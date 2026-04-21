@@ -7,5 +7,7 @@
 from hydra import initialize_config_module
 from hydra.core.global_hydra import GlobalHydra
 
+from .wrapper import EfficientTrackAnythingWrapper
+
 if not GlobalHydra.instance().is_initialized():
     initialize_config_module("efficient_track_anything", version_base="1.2")

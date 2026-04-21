@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vision_pipeline"
+version = "0.1.0"
+description = "Root integration environment for the vision pipeline."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "torch==2.6.0",
+  "torchvision==0.21.0",
+  "numpy==1.26.4",
+  "hydra-core==1.3.2",
+  "omegaconf==2.3.0",
+  "iopath==0.1.10",
+  "pillow==10.4.0",
+  "opencv-python==4.10.0.84",
+  "imageio==2.34.0",
+  "imageio-ffmpeg==0.5.1",
+  "scipy==1.12.0",
+  "trimesh==4.2.2",
+  "tqdm==4.66.5",
+  "PyYAML==6.0.3",
+]
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.pixi.workspace]
+channels = ["https://prefix.dev/conda-forge", "https://prefix.dev/robostack-jazzy"]
+platforms = ["linux-64"]
+
+[tool.pixi.dependencies]
+python = "3.12.*"
+numpy = "1.26.*"
+pyyaml = "==6.0.3"
+cmake = ">=3.28,<4"
+ninja = ">=1.11,<2"
+eigen = "3.4.*"
+ros-jazzy-ros-base = "*"
+ros-jazzy-sensor-msgs = "*"
+ros-jazzy-geometry-msgs = "*"
+ros-jazzy-rviz2 = "*"
+
+[tool.pixi.pypi-dependencies]
+vision_pipeline = { path = ".", editable = true }
+efficient_track_anything = { path = "segmentation/efficient_track_anything", editable = true }
+sam2 = { path = "segmentation/sam2", editable = true }
+foundationpose_wrapper = { path = "tracking/FoundationPose_plus_plus/FoundationPose", editable = true }
+pyrealsense2 = "==2.57.7.10387"
+
+[tool.pixi.tasks]
+import-smoke = "python -c \"import efficient_track_anything.wrapper, sam2.wrapper, foundationpose_wrapper; print('import smoke passed')\""
+wrapper-smoke = "python -c \"from efficient_track_anything.wrapper import EfficientTrackAnythingWrapper; from sam2.wrapper import Sam2Wrapper; from foundationpose_wrapper import FoundationPoseWrapper; EfficientTrackAnythingWrapper(); Sam2Wrapper(); FoundationPoseWrapper(); print('wrapper smoke passed')\""
+ros-smoke = "python -c \"import rclpy; from sensor_msgs.msg import CameraInfo, Image; from geometry_msgs.msg import PoseStamped; print('ros smoke passed')\""
+pipeline-help = "python -m src.pipeline --help"
+pipeline-dry-run = "python -m src.pipeline --dry-run"
+env-diagnostics = "python -c \"import os, sys, torch; print(sys.executable); print(torch.__version__); print(torch.version.cuda); print(os.environ.get('CUDA_HOME', ''))\""
+cuda126-shell = { cmd = "bash", env = { CUDA_HOME = "/usr/local/cuda-12.6", CUDA_PATH = "/usr/local/cuda-12.6", CUDACXX = "/usr/local/cuda-12.6/bin/nvcc" } }
+
+[tool.pixi.system-requirements]
+cuda = "12.6"
