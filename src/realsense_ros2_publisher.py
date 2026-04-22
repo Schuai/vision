@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """ROS2 publisher for a USB RealSense camera when realsense-ros is unavailable."""
 
 from __future__ import annotations

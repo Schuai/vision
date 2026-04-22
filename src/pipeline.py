@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 from dataclasses import asdict, dataclass
 
 from efficient_track_anything.wrapper import EfficientTrackAnythingWrapper
-from foundationpose_wrapper import FoundationPoseWrapper
 from sam2.wrapper import Sam2Wrapper
 
 
@@ -26,13 +26,17 @@ class VisionPipeline:
         self.device = device
         self.efficient_track_anything = EfficientTrackAnythingWrapper(device=device)
         self.sam2 = Sam2Wrapper(device=device)
-        self.foundationpose = FoundationPoseWrapper(device=device)
+        self.foundationpose = None
+        if importlib.util.find_spec("foundationpose_wrapper") is not None:
+            from foundationpose_wrapper import FoundationPoseWrapper
+
+            self.foundationpose = FoundationPoseWrapper(device=device)
 
     def status(self) -> PipelineStatus:
         return PipelineStatus(
             efficient_track_anything_loaded=self.efficient_track_anything.is_loaded,
             sam2_loaded=self.sam2.is_loaded,
-            foundationpose_loaded=self.foundationpose.is_loaded,
+            foundationpose_loaded=bool(self.foundationpose and self.foundationpose.is_loaded),
             device=self.device,
         )
 

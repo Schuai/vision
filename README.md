@@ -53,8 +53,8 @@ pixi run env-diagnostics
 
 What these do:
 
-- `import-smoke`: verifies the root env can import `efficient_track_anything.wrapper`, `sam2.wrapper`, and `foundationpose_wrapper`
-- `wrapper-smoke`: instantiates the three wrapper classes without loading model weights
+- `import-smoke`: verifies the root env can import `efficient_track_anything.wrapper` and `sam2.wrapper`
+- `wrapper-smoke`: instantiates the two root-env tracker wrappers without loading model weights
 - `pipeline-dry-run`: starts the root integration entrypoint and prints wrapper status
 - `env-diagnostics`: prints the active Python path, PyTorch version, CUDA runtime version, and `CUDA_HOME`
 
@@ -117,9 +117,14 @@ The root pipeline imports these stable wrapper entrypoints:
 ```python
 from efficient_track_anything.wrapper import EfficientTrackAnythingWrapper
 from sam2.wrapper import Sam2Wrapper
+```
+
+`FoundationPoseWrapper` now lives in the dedicated FoundationPose Pixi environment:
+
+```python
 from foundationpose_wrapper import FoundationPoseWrapper
 ```
 
 ### Known Caveat
 
-`FoundationPoseWrapper` is importable and instantiable in the Pixi environments, but full runtime loading may still require extra upstream native dependencies. In particular, the current FoundationPose build script still references a missing `bundlesdf/mycuda` path, so native extension setup there is not fully repaired yet.
+Use `pixi run -m tracking/FoundationPose_plus_plus/FoundationPose ...` for FoundationPose-backed commands such as `src.ros2_pose_tracker`. The root Pixi environment intentionally does not solve FoundationPose anymore, because it uses a different Torch and torchvision stack than the root tracker environment.

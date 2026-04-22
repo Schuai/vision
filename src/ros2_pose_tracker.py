@@ -13,9 +13,7 @@ import cv2
 import numpy as np
 import torch
 
-from efficient_track_anything.wrapper import EfficientTrackAnythingWrapper
 from foundationpose_wrapper import FoundationPoseWrapper
-from sam2.wrapper import Sam2Wrapper
 
 from src.ros2_utils import (
     bbox_xywh_to_xyxy,
@@ -94,12 +92,16 @@ class CameraTrackerAdapter:
         self.mask_threshold = mask_threshold
 
         if tracker_name == "sam2":
+            from sam2.wrapper import Sam2Wrapper
+
             wrapper = Sam2Wrapper(device=device)
             self.predictor = wrapper.load_camera_predictor(
                 config_file=config_file,
                 checkpoint_path=checkpoint_path,
             )
         elif tracker_name == "efficienttam":
+            from efficient_track_anything.wrapper import EfficientTrackAnythingWrapper
+
             wrapper = EfficientTrackAnythingWrapper(device=device)
             self.predictor = wrapper.load_camera_predictor(
                 config_file=config_file,
@@ -111,24 +113,14 @@ class CameraTrackerAdapter:
     def initialize(
         self,
         frame_rgb: np.ndarray,
-        init_mask: np.ndarray | None,
-        init_bbox_xywh: list[float] | None,
+        init_bbox_xywh: list[float],
     ) -> SegmentationResult:
         self.predictor.load_first_frame(frame_rgb)
-        if init_mask is not None:
-            _, obj_ids, mask_logits = self.predictor.add_new_mask(
-                frame_idx=0,
-                obj_id=self.object_id,
-                mask=np.asarray(init_mask, dtype=bool),
-            )
-        elif init_bbox_xywh is not None:
-            _, obj_ids, mask_logits = self.predictor.add_new_prompt(
-                frame_idx=0,
-                obj_id=self.object_id,
-                bbox=bbox_xywh_to_xyxy(init_bbox_xywh),
-            )
-        else:
-            raise ValueError("Either init_mask or init_bbox_xywh must be provided.")
+        _, obj_ids, mask_logits = self.predictor.add_new_prompt(
+            frame_idx=0,
+            obj_id=self.object_id,
+            bbox=bbox_xywh_to_xyxy(init_bbox_xywh),
+        )
 
         mask = self._extract_object_mask(obj_ids, mask_logits)
         return SegmentationResult(mask=mask, bbox_xywh=binary_mask_to_bbox_xywh(mask))
@@ -186,12 +178,18 @@ class LiveObjectPoseTrackerNode:
             mask_threshold=args.mask_threshold,
         )
 
-        self.init_mask = self._load_init_mask(args.init_mask_path) if args.init_mask_path else None
-        self.init_bbox_xywh = list(args.init_bbox) if args.init_bbox is not None else None
-        if self.init_mask is None and self.init_bbox_xywh is None:
-            raise ValueError("Provide either --init-mask-path or --init-bbox to initialize tracking.")
-
         self.initialized = False
+        self.init_preview_window_name = "RAW(LiveObjectPoseTracker)"
+        self.init_edit_window_name = "Edit mode(LiveObjectPoseTracker)"
+        self.init_ui_state: dict[str, Any] = {
+            "edit_mode": False,
+            "drawing": False,
+            "start_point": None,
+            "end_point": None,
+            "bbox": None,
+            "new_bbox": False,
+            "frozen_frame_bgr": None,
+        }
 
         self.pose_pub = self.node.create_publisher(PoseStamped, args.pose_topic, 10)
         self.mask_pub = self.node.create_publisher(Image, args.mask_topic, 10) if args.publish_mask else None
@@ -206,12 +204,9 @@ class LiveObjectPoseTrackerNode:
         self.node.get_logger().info(
             f"Tracking {args.tracker} + FoundationPose from {args.color_topic} and {args.depth_topic}"
         )
-
-    def _load_init_mask(self, init_mask_path: str) -> np.ndarray:
-        mask = cv2.imread(init_mask_path, cv2.IMREAD_GRAYSCALE)
-        if mask is None:
-            raise FileNotFoundError(f"Failed to read init mask: {init_mask_path}")
-        return mask.astype(bool)
+        self.node.get_logger().info(
+            "Live preview will stay open until you press 'e' to freeze a frame and draw the initial bbox."
+        )
 
     def _on_color(self, msg: object) -> None:
         with self.lock:
@@ -271,10 +266,12 @@ class LiveObjectPoseTrackerNode:
         depth_m = depth_msg_to_meters(depth_msg, depth_scale_for_uint16=self.args.depth_scale)
 
         if not self.initialized:
+            init_bbox_xywh = self._select_initial_bbox(color_rgb)
+            if init_bbox_xywh is None:
+                return
             segmentation = self.segmenter.initialize(
                 frame_rgb=color_rgb,
-                init_mask=self._match_init_mask_shape(self.init_mask, color_rgb.shape[:2]),
-                init_bbox_xywh=self.init_bbox_xywh,
+                init_bbox_xywh=init_bbox_xywh,
             )
             if segmentation.bbox_xywh[2] <= 0 or segmentation.bbox_xywh[3] <= 0:
                 raise RuntimeError("Initialization failed because the 2D tracker produced an empty mask.")
@@ -329,12 +326,130 @@ class LiveObjectPoseTrackerNode:
             )
             self.mask_pub.publish(mask_msg)
 
-    def _match_init_mask_shape(self, mask: np.ndarray | None, hw: tuple[int, int]) -> np.ndarray | None:
-        if mask is None:
+    @staticmethod
+    def _on_initial_bbox_mouse(event: int, x: int, y: int, flags: int, state: dict[str, Any]) -> None:
+        if event == cv2.EVENT_LBUTTONDOWN:
+            state["drawing"] = True
+            state["start_point"] = (x, y)
+            state["end_point"] = (x, y)
+        elif event == cv2.EVENT_MOUSEMOVE and state["drawing"]:
+            state["end_point"] = (x, y)
+        elif event == cv2.EVENT_LBUTTONUP and state["drawing"]:
+            state["drawing"] = False
+            state["end_point"] = (x, y)
+            state["bbox"] = (state["start_point"], state["end_point"])
+            state["new_bbox"] = True
+
+    @staticmethod
+    def _draw_overlay_lines(image: np.ndarray, lines: list[str]) -> np.ndarray:
+        output = image.copy()
+        for idx, line in enumerate(lines):
+            cv2.putText(
+                output,
+                line,
+                (10, 30 + idx * 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+        return output
+
+    @staticmethod
+    def _bbox_points_to_xywh(bbox: tuple[tuple[int, int], tuple[int, int]]) -> list[float]:
+        (x0, y0), (x1, y1) = bbox
+        x_min = float(min(x0, x1))
+        y_min = float(min(y0, y1))
+        width = float(abs(x1 - x0))
+        height = float(abs(y1 - y0))
+        return [x_min, y_min, width, height]
+
+    def _reset_initial_bbox_state(self) -> None:
+        self.init_ui_state.update(
+            {
+                "edit_mode": False,
+                "drawing": False,
+                "start_point": None,
+                "end_point": None,
+                "bbox": None,
+                "new_bbox": False,
+                "frozen_frame_bgr": None,
+            }
+        )
+
+    def _destroy_initial_bbox_windows(self, destroy_preview: bool = False) -> None:
+        try:
+            cv2.destroyWindow(self.init_edit_window_name)
+        except cv2.error:
+            pass
+        if destroy_preview:
+            try:
+                cv2.destroyWindow(self.init_preview_window_name)
+            except cv2.error:
+                pass
+
+    def _select_initial_bbox(self, frame_rgb: np.ndarray) -> list[float] | None:
+        state = self.init_ui_state
+        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        preview_lines = ["Press 'e' to freeze the current frame and draw the initial bbox."]
+        if state["edit_mode"]:
+            preview_lines.append("Edit mode is open in the other window.")
+        else:
+            preview_lines.append("Live camera preview will keep updating until you press 'e'.")
+        preview = self._draw_overlay_lines(frame_bgr, preview_lines)
+        cv2.imshow(self.init_preview_window_name, preview)
+
+        if state["edit_mode"] and state["frozen_frame_bgr"] is not None:
+            edit_image = self._draw_overlay_lines(
+                state["frozen_frame_bgr"],
+                [
+                    "Drag a box around the object.",
+                    "Press 'e' or Esc to cancel and return to live view.",
+                ],
+            )
+            if state["bbox"] is not None:
+                cv2.rectangle(edit_image, state["bbox"][0], state["bbox"][1], (0, 255, 0), 2)
+            if state["drawing"] and state["start_point"] is not None and state["end_point"] is not None:
+                cv2.rectangle(edit_image, state["start_point"], state["end_point"], (0, 255, 0), 2)
+            cv2.imshow(self.init_edit_window_name, edit_image)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("e"):
+            if not state["edit_mode"]:
+                state.update(
+                    {
+                        "edit_mode": True,
+                        "drawing": False,
+                        "start_point": None,
+                        "end_point": None,
+                        "bbox": None,
+                        "new_bbox": False,
+                        "frozen_frame_bgr": frame_bgr.copy(),
+                    }
+                )
+                cv2.namedWindow(self.init_edit_window_name)
+                cv2.setMouseCallback(self.init_edit_window_name, self._on_initial_bbox_mouse, state)
+            else:
+                self._destroy_initial_bbox_windows(destroy_preview=False)
+                self._reset_initial_bbox_state()
+                return None
+        elif key == 27 and state["edit_mode"]:
+            self._destroy_initial_bbox_windows(destroy_preview=False)
+            self._reset_initial_bbox_state()
             return None
-        if mask.shape == hw:
-            return mask
-        return cv2.resize(mask.astype(np.uint8), (hw[1], hw[0]), interpolation=cv2.INTER_NEAREST).astype(bool)
+
+        if state["new_bbox"] and state["bbox"] is not None:
+            bbox_xywh = self._bbox_points_to_xywh(state["bbox"])
+            state["new_bbox"] = False
+            if bbox_xywh[2] <= 0.0 or bbox_xywh[3] <= 0.0:
+                state["bbox"] = None
+                return None
+            self._destroy_initial_bbox_windows(destroy_preview=True)
+            self._reset_initial_bbox_state()
+            return bbox_xywh
+
+        return None
 
 
 def _parse_json_list(value: str) -> list[float]:
@@ -362,8 +477,6 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--object-id", type=int, default=1)
     parser.add_argument("--mask-threshold", type=float, default=0.0)
-    parser.add_argument("--init-mask-path", type=str, default=None)
-    parser.add_argument("--init-bbox", type=_parse_json_list, default=None, help='JSON list "[x, y, w, h]".')
     parser.add_argument("--cam-k", type=_parse_json_list, default=None, help='Optional JSON list with 9 intrinsics.')
     parser.add_argument("--est-refine-iter", type=int, default=10)
     parser.add_argument("--track-refine-iter", type=int, default=5)
@@ -386,13 +499,9 @@ def main() -> None:
     args = build_argparser().parse_args()
     args.tracker_config = _resolve_tracker_config(args)
     args.mesh_path = str(Path(args.mesh_path).expanduser().resolve())
-    if args.init_mask_path:
-        args.init_mask_path = str(Path(args.init_mask_path).expanduser().resolve())
     args.tracker_checkpoint = str(Path(args.tracker_checkpoint).expanduser().resolve())
     if args.cam_k is not None and len(args.cam_k) != 9:
         raise ValueError("--cam-k must contain 9 values.")
-    if args.init_bbox is not None and len(args.init_bbox) != 4:
-        raise ValueError("--init-bbox must contain 4 values.")
 
     import rclpy
 

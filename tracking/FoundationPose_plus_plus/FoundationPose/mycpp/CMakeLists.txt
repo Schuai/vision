@@ -1,5 +1,3 @@
-include_directories(/home/admin01/miniconda3/envs/foundationpose/include/eigen3)
-
 cmake_minimum_required(VERSION 3.15)
 project(mycpp)
 

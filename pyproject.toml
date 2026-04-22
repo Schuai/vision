@@ -48,12 +48,11 @@ ros-jazzy-rviz2 = "*"
 vision_pipeline = { path = ".", editable = true }
 efficient_track_anything = { path = "segmentation/efficient_track_anything", editable = true }
 sam2 = { path = "segmentation/sam2", editable = true }
-foundationpose_wrapper = { path = "tracking/FoundationPose_plus_plus/FoundationPose", editable = true }
 pyrealsense2 = "==2.57.7.10387"
 
 [tool.pixi.tasks]
-import-smoke = "python -c \"import efficient_track_anything.wrapper, sam2.wrapper, foundationpose_wrapper; print('import smoke passed')\""
-wrapper-smoke = "python -c \"from efficient_track_anything.wrapper import EfficientTrackAnythingWrapper; from sam2.wrapper import Sam2Wrapper; from foundationpose_wrapper import FoundationPoseWrapper; EfficientTrackAnythingWrapper(); Sam2Wrapper(); FoundationPoseWrapper(); print('wrapper smoke passed')\""
+import-smoke = "python -c \"import efficient_track_anything.wrapper, sam2.wrapper; print('import smoke passed')\""
+wrapper-smoke = "python -c \"from efficient_track_anything.wrapper import EfficientTrackAnythingWrapper; from sam2.wrapper import Sam2Wrapper; EfficientTrackAnythingWrapper(); Sam2Wrapper(); print('wrapper smoke passed')\""
 ros-smoke = "python -c \"import rclpy; from sensor_msgs.msg import CameraInfo, Image; from geometry_msgs.msg import PoseStamped; print('ros smoke passed')\""
 pipeline-help = "python -m src.pipeline --help"
 pipeline-dry-run = "python -m src.pipeline --dry-run"

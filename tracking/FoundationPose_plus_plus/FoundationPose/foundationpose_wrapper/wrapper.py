@@ -39,8 +39,9 @@ class FoundationPoseWrapper:
         except ModuleNotFoundError as exc:
             raise RuntimeError(
                 "FoundationPose runtime dependencies are incomplete. "
-                "Install the FoundationPose Pixi environment and any native extras required "
-                "by the upstream project before calling FoundationPoseWrapper.load()."
+                "Install the FoundationPose Pixi environment extras "
+                "(for example `pixi run -m tracking/FoundationPose_plus_plus/FoundationPose install-runtime`) "
+                "before calling FoundationPoseWrapper.load()."
             ) from exc
 
         mesh = trimesh.load(mesh_path)

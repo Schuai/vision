@@ -9,8 +9,8 @@ description = "Wrapper packaging for FoundationPose integration."
 readme = "readme.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-  "torch>=2.6,<2.7",
-  "torchvision>=0.21,<0.22",
+  "torch==2.4.1",
+  "torchvision==0.19.1",
   "numpy>=1.26,<2",
   "scipy>=1.12,<2",
   "PyYAML>=6,<7",
@@ -40,7 +40,8 @@ dependencies = [
   "matplotlib>=3.9,<4",
   "tqdm>=4.66,<5",
   "fvcore==0.1.5.post20221221",
-  "Pillow>=10.4,<11",
+  "iopath==0.1.10",
+  "Pillow>=10.4,<13",
   "scikit-image>=0.22,<1",
   "scikit-learn>=1.4,<2",
 ]
@@ -55,23 +56,37 @@ include = ["foundationpose_wrapper*", "learning*", "bundlesdf*"]
 bundlesdf = ["*.yml", "*.yaml"]
 
 [tool.pixi.workspace]
-channels = ["conda-forge"]
+channels = ["https://prefix.dev/conda-forge", "https://prefix.dev/robostack-jazzy"]
 platforms = ["linux-64"]
 
 [tool.pixi.dependencies]
 python = "3.12.*"
+pip = "*"
+numpy = "1.26.*"
 cmake = ">=3.28,<4"
 ninja = ">=1.11,<2"
 eigen = "3.4.*"
+pybind11 = ">=2.12,<4"
+gcc_linux-64 = "12.*"
+gxx_linux-64 = "12.*"
+open3d = "0.19.*"
+cuda-nvcc_linux-64 = "12.1.*"
+cuda-libraries-dev = "12.1.*"
+ros-jazzy-ros-base = "*"
+ros-jazzy-sensor-msgs = "*"
+ros-jazzy-geometry-msgs = "*"
 
 [tool.pixi.pypi-dependencies]
 foundationpose_wrapper = { path = ".", editable = true }
+efficient_track_anything = { path = "../../../segmentation/efficient_track_anything", editable = true }
 
 [tool.pixi.tasks]
 import-smoke = "python -c \"import foundationpose_wrapper; print('foundationpose_wrapper import smoke passed')\""
 wrapper-smoke = "python -c \"from foundationpose_wrapper import FoundationPoseWrapper; FoundationPoseWrapper(); print('foundationpose_wrapper smoke passed')\""
+runtime-smoke = "python -c \"import importlib.util as u; print('pytorch3d', bool(u.find_spec('pytorch3d'))); print('nvdiffrast', bool(u.find_spec('nvdiffrast'))); print('open3d', bool(u.find_spec('open3d')));\""
+install-runtime = "bash install_runtime.sh"
 build-native = "bash build_all_conda.sh"
 cuda126-shell = { cmd = "bash", env = { CUDA_HOME = "/usr/local/cuda-12.6", CUDA_PATH = "/usr/local/cuda-12.6", CUDACXX = "/usr/local/cuda-12.6/bin/nvcc" } }
 
 [tool.pixi.system-requirements]
-cuda = "12.6"
+cuda = "12.1"
