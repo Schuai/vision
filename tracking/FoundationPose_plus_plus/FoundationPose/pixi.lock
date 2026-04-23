@@ -147,6 +147,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/libattr-2.5.2-hb03c661_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libblas-3.11.0-6_h4a7cf45_openblas.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libboost-1.88.0-hd24cca6_7.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libboost-devel-1.88.0-hfcd1e18_7.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libboost-headers-1.88.0-ha770c72_7.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libbrotlicommon-1.2.0-hb03c661_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libbrotlidec-1.2.0-hb03c661_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libbrotlienc-1.2.0-hb03c661_1.conda
@@ -660,6 +662,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/fe/7b/7757205dee3628f75e7991021d15cd1bd0c9b044ca9affe99b50879fc0e1/triton-3.0.0-1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/b0/70/d460bd685a170790ec89317e9bd33047988e4bce507b831f5db771e142de/tzdata-2026.1-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b1/5e/512aeb40fd819f4660d00f96f5c7371ee36fc8c6b605128c5ee59e0b28c6/u_msgpack_python-2.8.0-py2.py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/58/c7/d8d8a510d339e1a0a2e9ae3a8a906572a28c89e177a042323ff4ebfd8f16/warp_lang-1.0.2-py3-none-manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/68/5a/199c59e0a824a3db2b89c5d2dade7ab5f9624dbf6448dc291b46d5ec94d3/wcwidth-0.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6e/e1/c1140ab6533668930895512ac5cbf07972fa41ebab275f5f5cdd432bc3c7/webdataset-0.2.111-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/38/4f/fe9a4d472aa867878ce3bb7efb16654c5d63672b86dc0e6e953a67018433/yacs-0.1.8-py3-none-any.whl
@@ -1968,7 +1971,7 @@ packages:
 - pypi: ./
   name: foundationpose-wrapper
   version: 0.1.0
-  sha256: e02511cf1c9e17eb24b7c685023d3bbfc326a8694660360d28a973827b004ed2
+  sha256: 669952c62163e650d47ad97aff3eee738cc660d745e1a45b266df76ab69a0610
   requires_dist:
   - torch==2.4.1
   - torchvision==0.19.1
@@ -1996,6 +1999,7 @@ packages:
   - einops>=0.7,<1
   - transformations==2024.6.1
   - joblib>=1.3,<2
+  - warp-lang==1.0.2
   - psutil>=5.9.8,<8
   - pandas>=2.2,<3
   - matplotlib>=3.9,<4
@@ -3173,6 +3177,27 @@ packages:
   purls: []
   size: 3072984
   timestamp: 1766347479317
+- conda: https://prefix.dev/conda-forge/linux-64/libboost-devel-1.88.0-hfcd1e18_7.conda
+  sha256: 249e7a58aee14a619d4f6bca3ad955b7a0a84aad6ab201f734bb21ea16e654e6
+  md5: 97ac87592030b16fa193c877538be3d5
+  depends:
+  - libboost 1.88.0 hd24cca6_7
+  - libboost-headers 1.88.0 ha770c72_7
+  constrains:
+  - boost-cpp <0.0a0
+  license: BSL-1.0
+  purls: []
+  size: 40112
+  timestamp: 1766347628036
+- conda: https://prefix.dev/conda-forge/linux-64/libboost-headers-1.88.0-ha770c72_7.conda
+  sha256: 88194078f2de6b68c40563871ccf638fd48cd1cf1d203ac4e653cee9cedd31a6
+  md5: d9011bcea61514b510209b882a459a57
+  constrains:
+  - boost-cpp <0.0a0
+  license: BSL-1.0
+  purls: []
+  size: 14584021
+  timestamp: 1766347497416
 - conda: https://prefix.dev/conda-forge/linux-64/libbrotlicommon-1.2.0-hb03c661_1.conda
   sha256: 318f36bd49ca8ad85e6478bd8506c88d82454cc008c1ac1c6bf00a3c42fa610e
   md5: 72c8fd1af66bd67bf580645b426513ed
@@ -10996,6 +11021,20 @@ packages:
   - pkg:pypi/vtk?source=hash-mapping
   size: 85574339
   timestamp: 1773160109320
+- pypi: https://files.pythonhosted.org/packages/58/c7/d8d8a510d339e1a0a2e9ae3a8a906572a28c89e177a042323ff4ebfd8f16/warp_lang-1.0.2-py3-none-manylinux2014_x86_64.whl
+  name: warp-lang
+  version: 1.0.2
+  sha256: 64a8684d2356d030a39c9cecc14776574bcac424b228ac1e083c40fb278b0d60
+  requires_dist:
+  - numpy
+  - flake8 ; extra == 'dev'
+  - black ; extra == 'dev'
+  - isort ; extra == 'dev'
+  - nvtx ; extra == 'dev'
+  - furo ; extra == 'dev'
+  - sphinx-copybutton ; extra == 'dev'
+  - coverage[toml] ; extra == 'dev'
+  requires_python: '>=3.7'
 - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.25.0-hd6090a7_0.conda
   sha256: ea374d57a8fcda281a0a89af0ee49a2c2e99cc4ac97cf2e2db7064e74e764bdb
   md5: 996583ea9c796e5b915f7d7580b51ea6

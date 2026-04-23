@@ -5,19 +5,24 @@ from __future__ import annotations
 import argparse
 import time
 
-from src.realsense_ros2_publisher import DEFAULT_PHYSICAL_PORT_HINT, enumerate_realsense_devices, resolve_device_serial
+from src.realsense_ros2_publisher import DEFAULT_SERIAL_NUMBER, enumerate_realsense_devices, resolve_device_serial
 
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Start a RealSense stream and report whether frames arrive reliably without ROS2."
     )
-    parser.add_argument("--serial-number", type=str, default=None)
+    parser.add_argument(
+        "--serial-number",
+        type=str,
+        default=None,
+        help=f"Select a specific RealSense by serial number. Default device preference is serial {DEFAULT_SERIAL_NUMBER}.",
+    )
     parser.add_argument("--device-index", type=int, default=None, help="Select the Nth connected RealSense device.")
     parser.add_argument(
         "--physical-port-hint",
         type=str,
-        default=DEFAULT_PHYSICAL_PORT_HINT,
+        default=None,
         help="Prefer the RealSense connected on a physical port containing this substring.",
     )
     parser.add_argument("--list-devices", action="store_true", help="Print connected RealSense devices and exit.")

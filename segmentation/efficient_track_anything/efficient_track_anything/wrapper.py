@@ -65,6 +65,9 @@ class EfficientTrackAnythingWrapper:
             build_efficienttam_camera_predictor,
         )
 
+        # Match the current recommended EfficientTAM camera-tracking path by
+        # defaulting to the VOS-optimized predictor unless a caller overrides it.
+        kwargs.setdefault("vos_optimized", True)
         self.kind = "camera_predictor"
         self.instance = build_efficienttam_camera_predictor(
             config_file=config_file,

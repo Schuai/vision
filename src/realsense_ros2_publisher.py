@@ -9,7 +9,7 @@ import numpy as np
 
 from src.ros2_utils import make_camera_info_msg, numpy_to_image_msg
 
-DEFAULT_PHYSICAL_PORT_HINT = "2-9"
+DEFAULT_SERIAL_NUMBER = "251622061129"
 DEFAULT_SHARED_COLOR_DEPTH_MODES = (
     (640, 480, (6, 15, 30)),
     (1280, 720, (6,)),
@@ -60,7 +60,7 @@ def select_realsense_device(
     device_index: int | None,
     physical_port_hint: str | None,
 ) -> dict[str, str] | None:
-    """Resolve the RealSense device to use from explicit selectors or the default USB path."""
+    """Resolve the RealSense device to use from explicit selectors or the default serial."""
 
     devices = enumerate_realsense_devices(rs)
     if not devices:
@@ -78,6 +78,10 @@ def select_realsense_device(
                 f"--device-index {device_index} is out of range for {len(devices)} connected RealSense devices."
             )
         return devices[device_index]
+
+    for device in devices:
+        if device["serial_number"] == DEFAULT_SERIAL_NUMBER:
+            return device
 
     if physical_port_hint:
         for device in devices:
@@ -169,6 +173,40 @@ def build_ros_qos_profile(qos_module: object, reliability: str, depth: int) -> o
     )
 
 
+def configure_realsense_streams(
+    config: object,
+    rs: object,
+    serial_number: str,
+    width: int,
+    height: int,
+    fps: int,
+    enable_depth: bool,
+) -> None:
+    """Configure a RealSense pipeline for the requested device and stream set."""
+
+    config.enable_device(serial_number)
+    config.enable_stream(rs.stream.color, width, height, rs.format.rgb8, fps)
+    if enable_depth:
+        config.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
+
+
+def _colorize_depth_for_preview(cv2_module: object, depth: np.ndarray) -> np.ndarray:
+    """Convert a depth image into a preview-friendly heatmap."""
+
+    depth_preview = cv2_module.convertScaleAbs(depth, alpha=0.03)
+    return cv2_module.applyColorMap(depth_preview, cv2_module.COLORMAP_JET)
+
+
+def build_preview_frame(cv2_module: object, color: np.ndarray, depth: np.ndarray | None) -> np.ndarray:
+    """Return the OpenCV preview frame for the current RealSense capture."""
+
+    color_bgr = cv2_module.cvtColor(color, cv2_module.COLOR_RGB2BGR)
+    if depth is None:
+        return color_bgr
+    depth_preview = _colorize_depth_for_preview(cv2_module, depth)
+    return np.hstack((color_bgr, depth_preview))
+
+
 class RealSensePublisherNode:
     """Publish RGB, aligned depth, and camera info topics from a USB RealSense camera."""
 
@@ -191,6 +229,9 @@ class RealSensePublisherNode:
         self.color_pub = None
         self.depth_pub = None
         self.consecutive_timeouts = 0
+        self.cv2 = None
+        self.preview_enabled = False
+        self.preview_window_initialized = False
         self.selected_serial, self.selected_device = resolve_device_serial(
             rs=rs,
             serial_number=args.serial_number,
@@ -211,6 +252,8 @@ class RealSensePublisherNode:
             reliability=args.qos_reliability,
             depth=args.qos_depth,
         )
+        self.preview_window_name = f"RealSense Preview {self.selected_serial}"
+        self._configure_preview()
 
         if not args.camera_info_only:
             self.color_pub = self.node.create_publisher(Image, args.color_topic, publisher_qos)
@@ -248,13 +291,93 @@ class RealSensePublisherNode:
         if not args.rgb_only:
             self.align = rs.align(rs.stream.color)
         config = rs.config()
-        if self.selected_serial:
-            config.enable_device(self.selected_serial)
-        config.enable_stream(rs.stream.color, args.width, args.height, rs.format.rgb8, args.fps)
-        if not args.rgb_only:
-            config.enable_stream(rs.stream.depth, args.width, args.height, rs.format.z16, args.fps)
+        configure_realsense_streams(
+            config=config,
+            rs=rs,
+            serial_number=self.selected_serial,
+            width=args.width,
+            height=args.height,
+            fps=args.fps,
+            enable_depth=not args.rgb_only,
+        )
         self.profile = self.pipeline.start(config)
         self.node.create_timer(1.0 / max(args.fps, 1), self._publish_frame)
+
+    def _configure_preview(self) -> None:
+        if self.args.vis != 1:
+            return
+        if self.args.camera_info_only:
+            self.node.get_logger().warning(
+                "Ignoring --vis 1 because --camera-info-only does not acquire live frames."
+            )
+            return
+        try:
+            import cv2
+        except ModuleNotFoundError:
+            self.node.get_logger().warning(
+                "Ignoring --vis 1 because OpenCV is not installed in the current Python environment."
+            )
+            return
+
+        self.cv2 = cv2
+        self.preview_enabled = True
+        self.node.get_logger().info(
+            "Preview window enabled. Close the window or press q/Esc to hide it without stopping ROS2 publishing."
+        )
+
+    def _disable_preview(self, reason: str) -> None:
+        if not self.preview_enabled and not self.preview_window_initialized:
+            return
+
+        self.preview_enabled = False
+        if reason:
+            self.node.get_logger().info(reason)
+        self._destroy_preview_window()
+
+    def _destroy_preview_window(self) -> None:
+        if self.cv2 is None or not self.preview_window_initialized:
+            return
+        try:
+            self.cv2.destroyWindow(self.preview_window_name)
+        except self.cv2.error:
+            try:
+                self.cv2.destroyAllWindows()
+            except self.cv2.error:
+                pass
+        self.preview_window_initialized = False
+
+    def _update_preview(self, color: np.ndarray, depth: np.ndarray | None) -> None:
+        if not self.preview_enabled or self.cv2 is None:
+            return
+
+        try:
+            if self.preview_window_initialized:
+                try:
+                    if self.cv2.getWindowProperty(self.preview_window_name, self.cv2.WND_PROP_VISIBLE) < 1:
+                        self._disable_preview(
+                            "Preview window closed. Continuing ROS2 publishing without visualization."
+                        )
+                        return
+                except self.cv2.error:
+                    self._disable_preview(
+                        "Preview window closed. Continuing ROS2 publishing without visualization."
+                    )
+                    return
+            else:
+                self.cv2.namedWindow(self.preview_window_name, self.cv2.WINDOW_NORMAL)
+                self.preview_window_initialized = True
+
+            preview = build_preview_frame(self.cv2, color, depth)
+            self.cv2.imshow(self.preview_window_name, preview)
+            key = self.cv2.waitKey(1) & 0xFF
+            if key in (27, ord("q")):
+                self._disable_preview(
+                    "Preview disabled by user input. Continuing ROS2 publishing without visualization."
+                )
+        except self.cv2.error as exc:
+            self._disable_preview(
+                f"Disabling preview after an OpenCV window error: {exc}. ROS2 publishing will continue."
+            )
 
     def _publish_camera_info(self, stamp: object) -> None:
         camera_info_msg = make_camera_info_msg(
@@ -302,6 +425,7 @@ class RealSensePublisherNode:
             )
             self.color_pub.publish(color_msg)
             self._publish_camera_info(stamp)
+            self._update_preview(color=color, depth=None)
             return
 
         aligned = self.align.process(frames)
@@ -329,8 +453,10 @@ class RealSensePublisherNode:
         self.color_pub.publish(color_msg)
         self.depth_pub.publish(depth_msg)
         self._publish_camera_info(stamp)
+        self._update_preview(color=color, depth=depth)
 
     def shutdown(self) -> None:
+        self._destroy_preview_window()
         if self.pipeline is not None:
             self.pipeline.stop()
         self.node.destroy_node()
@@ -343,15 +469,27 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--depth-topic", type=str, default="/camera/aligned_depth_to_color/image_raw")
     parser.add_argument("--camera-info-topic", type=str, default="/camera/color/camera_info")
     parser.add_argument("--frame-id", type=str, default="camera_color_optical_frame")
-    parser.add_argument("--serial-number", type=str, default=None)
+    parser.add_argument(
+        "--serial-number",
+        type=str,
+        default=None,
+        help=f"Select a specific RealSense by serial number. Default device preference is serial {DEFAULT_SERIAL_NUMBER}.",
+    )
     parser.add_argument("--device-index", type=int, default=None, help="Select the Nth connected RealSense device.")
     parser.add_argument(
         "--physical-port-hint",
         type=str,
-        default=DEFAULT_PHYSICAL_PORT_HINT,
+        default=None,
         help="Prefer the RealSense connected on a physical port containing this substring.",
     )
     parser.add_argument("--list-devices", action="store_true", help="Print connected RealSense devices and exit.")
+    parser.add_argument(
+        "--vis",
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help="Set to 1 to show a live preview window while ROS2 publishing continues in the background.",
+    )
     parser.add_argument("--width", type=int, default=640, help=f"Stream width for both color and depth. {shared_mode_help}")
     parser.add_argument(
         "--height",

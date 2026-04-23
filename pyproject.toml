@@ -29,26 +29,54 @@ dependencies = [
 include = ["src*"]
 
 [tool.pixi.workspace]
-channels = ["https://prefix.dev/conda-forge", "https://prefix.dev/robostack-jazzy"]
+channels = ["https://prefix.dev/conda-forge"]
 platforms = ["linux-64"]
 
-[tool.pixi.dependencies]
+[tool.pixi.feature.base.dependencies]
 python = "3.12.*"
 numpy = "1.26.*"
 pyyaml = "==6.0.3"
 cmake = ">=3.28,<4"
 ninja = ">=1.11,<2"
 eigen = "3.4.*"
+
+[tool.pixi.feature.base.pypi-dependencies]
+vision_pipeline = { path = ".", editable = true }
+efficient_track_anything = { path = "segmentation/efficient_track_anything", editable = true }
+sam2 = { path = "segmentation/sam2", editable = true }
+pyrealsense2 = "==2.57.7.10387"
+
+[tool.pixi.feature.jazzy]
+channels = ["https://prefix.dev/robostack-jazzy"]
+
+[tool.pixi.feature.jazzy.dependencies]
 ros-jazzy-ros-base = "*"
 ros-jazzy-sensor-msgs = "*"
 ros-jazzy-geometry-msgs = "*"
 ros-jazzy-rviz2 = "*"
 
-[tool.pixi.pypi-dependencies]
-vision_pipeline = { path = ".", editable = true }
-efficient_track_anything = { path = "segmentation/efficient_track_anything", editable = true }
-sam2 = { path = "segmentation/sam2", editable = true }
-pyrealsense2 = "==2.57.7.10387"
+[tool.pixi.feature.humble]
+channels = ["https://prefix.dev/robostack-humble"]
+
+[tool.pixi.feature.humble.dependencies]
+ros-humble-ros-base = "*"
+ros-humble-sensor-msgs = "*"
+ros-humble-geometry-msgs = "*"
+ros-humble-rviz2 = "*"
+
+[tool.pixi.feature.cuda126.dependencies]
+cuda-nvcc_linux-64 = "12.6.*"
+cuda-libraries-dev = "12.6.*"
+
+[tool.pixi.feature.cuda126.system-requirements]
+cuda = "12.6"
+
+[tool.pixi.feature.cuda124.dependencies]
+cuda-nvcc_linux-64 = "12.4.*"
+cuda-libraries-dev = "12.4.*"
+
+[tool.pixi.feature.cuda124.system-requirements]
+cuda = "12.4"
 
 [tool.pixi.tasks]
 import-smoke = "python -c \"import efficient_track_anything.wrapper, sam2.wrapper; print('import smoke passed')\""
@@ -56,8 +84,30 @@ wrapper-smoke = "python -c \"from efficient_track_anything.wrapper import Effici
 ros-smoke = "python -c \"import rclpy; from sensor_msgs.msg import CameraInfo, Image; from geometry_msgs.msg import PoseStamped; print('ros smoke passed')\""
 pipeline-help = "python -m src.pipeline --help"
 pipeline-dry-run = "python -m src.pipeline --dry-run"
-env-diagnostics = "python -c \"import os, sys, torch; print(sys.executable); print(torch.__version__); print(torch.version.cuda); print(os.environ.get('CUDA_HOME', ''))\""
-cuda126-shell = { cmd = "bash", env = { CUDA_HOME = "/usr/local/cuda-12.6", CUDA_PATH = "/usr/local/cuda-12.6", CUDACXX = "/usr/local/cuda-12.6/bin/nvcc" } }
+env-diagnostics = "python -c \"import os, shutil, sys, torch; from pathlib import Path; nvcc = shutil.which('nvcc') or ''; cuda_home = str(Path(nvcc).resolve().parents[1]) if nvcc else os.environ.get('CUDA_HOME', ''); print(sys.executable); print(torch.__version__); print(torch.version.cuda); print(nvcc); print(cuda_home)\""
+ros2-pose-tracker-efficient-tam = "pixi run -m tracking/FoundationPose_plus_plus/FoundationPose ros2-pose-tracker-efficient-tam"
 
-[tool.pixi.system-requirements]
-cuda = "12.6"
+[tool.pixi.tasks.env-diagnostics-jazzy]
+cmd = "python -c \"import os, shutil, sys, torch; from pathlib import Path; nvcc = shutil.which('nvcc') or ''; cuda_home = str(Path(nvcc).resolve().parents[1]) if nvcc else os.environ.get('CUDA_HOME', ''); print(sys.executable); print(torch.__version__); print(torch.version.cuda); print(nvcc); print(cuda_home)\""
+default-environment = "jazzy-cuda126"
+
+[tool.pixi.tasks.env-diagnostics-humble]
+cmd = "python -c \"import os, shutil, sys, torch; from pathlib import Path; nvcc = shutil.which('nvcc') or ''; cuda_home = str(Path(nvcc).resolve().parents[1]) if nvcc else os.environ.get('CUDA_HOME', ''); print(sys.executable); print(torch.__version__); print(torch.version.cuda); print(nvcc); print(cuda_home)\""
+default-environment = "humble-cuda124"
+
+[tool.pixi.tasks.cuda126-shell]
+cmd = '''
+bash -lc 'cuda_home=$(dirname "$(dirname "$(command -v nvcc)")"); export CUDA_HOME="$cuda_home"; export CUDA_PATH="$cuda_home"; export CUDACXX="$cuda_home/bin/nvcc"; echo "Using CUDA toolkit at $CUDA_HOME"; exec bash'
+'''
+default-environment = "jazzy-cuda126"
+
+[tool.pixi.tasks.cuda124-shell]
+cmd = '''
+bash -lc 'cuda_home=$(dirname "$(dirname "$(command -v nvcc)")"); export CUDA_HOME="$cuda_home"; export CUDA_PATH="$cuda_home"; export CUDACXX="$cuda_home/bin/nvcc"; echo "Using CUDA toolkit at $CUDA_HOME"; exec bash'
+'''
+default-environment = "humble-cuda124"
+
+[tool.pixi.environments]
+default = { features = ["base", "jazzy", "cuda126"], solve-group = "jazzy-cuda126" }
+jazzy-cuda126 = { features = ["base", "jazzy", "cuda126"], solve-group = "jazzy-cuda126" }
+humble-cuda124 = { features = ["base", "humble", "cuda124"], solve-group = "humble-cuda124" }

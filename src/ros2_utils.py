@@ -52,10 +52,27 @@ def logits_to_binary_mask(mask_logits: object, object_index: int = 0, threshold:
     else:
         mask_array = np.asarray(mask_logits)
 
+    # Camera predictors may return singleton batch/channel dimensions such as
+    # (1, 1, H, W). Remove those first so single-object outputs become 2D or 3D.
+    mask_array = np.squeeze(mask_array)
+
     if mask_array.ndim == 3:
+        if object_index < 0 or object_index >= mask_array.shape[0]:
+            raise ValueError(
+                f"object_index {object_index} is out of range for mask logits shape {mask_array.shape}"
+            )
         selected = mask_array[object_index]
     elif mask_array.ndim == 2:
         selected = mask_array
+    elif mask_array.ndim > 3:
+        # Fall back to treating every leading slice as one candidate mask while
+        # preserving the spatial dimensions in the last two axes.
+        collapsed = mask_array.reshape((-1, mask_array.shape[-2], mask_array.shape[-1]))
+        if object_index < 0 or object_index >= collapsed.shape[0]:
+            raise ValueError(
+                f"object_index {object_index} is out of range for collapsed mask logits shape {collapsed.shape}"
+            )
+        selected = collapsed[object_index]
     else:
         raise ValueError(f"Unsupported mask logits shape: {mask_array.shape}")
 

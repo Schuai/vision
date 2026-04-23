@@ -323,6 +323,7 @@ def pose_track(
         draw_posed_3d_box,
         draw_xyz_axis,
     )
+    from FoundationPose.Utils import nvdiffrast_render
     import logging
 
     scorer = ScorePredictor()
@@ -419,7 +420,6 @@ def pose_track(
                     mask_visualization_path=mask_visualization_color_filename,
                     bbox_visualization_path=bbox_visualization_color_filename
                 )
-            # TODO: get occluded mask
             # adjusted_last_pose = adjust_pose_to_image_point(ob_in_cam=pose, K=cam_K, x=bbox_2d[0]+bbox_2d[2]/2, y=bbox_2d[1]+bbox_2d[3]/2)
             if activate_2d_tracker:
                 if not activate_kalman_filter:
@@ -430,6 +430,48 @@ def pose_track(
                     measurement_xy = np.array(get_pose_xy_from_image_point(ob_in_cam=est.pose_last, K=cam_K, x=bbox_2d[0]+bbox_2d[2]/2, y=bbox_2d[1]+bbox_2d[3]/2))
                     kf_mean, kf_covariance = kf.update_from_xy(kf_mean, kf_covariance, measurement_xy)
                     est.pose_last = torch.from_numpy(get_mat_from_6d_pose_arr(kf_mean[:6])).unsqueeze(0).to(est.pose_last.device)
+
+            occlusion_depth_margin = 0.01
+            pose_last_for_occ = est.pose_last.reshape(-1, 4, 4)
+            occluded_mask = None
+            if activate_2d_tracker and bbox_2d[0] >= 0 and bbox_2d[1] >= 0 and bbox_2d[2] > 0 and bbox_2d[3] > 0:
+                x0 = max(int(bbox_2d[0]), 0)
+                y0 = max(int(bbox_2d[1]), 0)
+                x1 = min(int(bbox_2d[0] + bbox_2d[2] + 1), depth.shape[1])
+                y1 = min(int(bbox_2d[1] + bbox_2d[3] + 1), depth.shape[0])
+                if x0 < x1 and y0 < y1:
+                    _, render_depth, _ = nvdiffrast_render(
+                        K=cam_K,
+                        H=depth.shape[0],
+                        W=depth.shape[1],
+                        ob_in_cams=pose_last_for_occ,
+                        glctx=glctx,
+                        context='cuda',
+                        mesh_tensors=est.mesh_tensors,
+                        bbox2d=torch.tensor([[x0, y0, x1, y1]], dtype=torch.float, device='cuda'),
+                        output_size=(y1 - y0, x1 - x0),
+                    )
+                    render_depth = render_depth[0].detach().cpu().numpy()
+                    depth_crop = depth[y0:y1, x0:x1]
+                    occluded_mask = (render_depth > 0.001) & (depth_crop > 0.001) & (depth_crop + occlusion_depth_margin < render_depth)
+                    if occluded_mask.any():
+                        depth = depth.copy()
+                        depth[y0:y1, x0:x1][occluded_mask] = 0
+            else:
+                _, render_depth, _ = nvdiffrast_render(
+                    K=cam_K,
+                    H=depth.shape[0],
+                    W=depth.shape[1],
+                    ob_in_cams=pose_last_for_occ,
+                    glctx=glctx,
+                    context='cuda',
+                    mesh_tensors=est.mesh_tensors,
+                )
+                render_depth = render_depth[0].detach().cpu().numpy()
+                occluded_mask = (render_depth > 0.001) & (depth > 0.001) & (depth + occlusion_depth_margin < render_depth)
+                if occluded_mask.any():
+                    depth = depth.copy()
+                    depth[occluded_mask] = 0
 
             pose = est.track_one(rgb=color, depth=depth, K=cam_K, iteration=track_refine_iter)
             if activate_2d_tracker and activate_kalman_filter:

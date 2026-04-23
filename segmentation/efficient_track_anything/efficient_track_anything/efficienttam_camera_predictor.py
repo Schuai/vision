@@ -56,8 +56,8 @@ class TAMCameraPredictor(EfficientTAMBase):
             width, height = img.size
         img = torch.from_numpy(img_np).permute(2, 0, 1).float()
 
-        img_mean = torch.tensor(img_mean, dtype=torch.float32)[:, None, None]
-        img_std = torch.tensor(img_std, dtype=torch.float32)[:, None, None]
+        img_mean = torch.tensor(img_mean, dtype=torch.float32, device=img.device)[:, None, None]
+        img_std = torch.tensor(img_std, dtype=torch.float32, device=img.device)[:, None, None]
         img -= img_mean
         img /= img_std
         return img, width, height

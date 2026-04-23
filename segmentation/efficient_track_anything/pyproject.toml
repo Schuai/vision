@@ -79,6 +79,8 @@ platforms = ["linux-64"]
 
 [tool.pixi.dependencies]
 python = "3.12.*"
+cuda-nvcc_linux-64 = "12.6.*"
+cuda-libraries-dev = "12.6.*"
 
 [tool.pixi.pypi-dependencies]
 efficient_track_anything = { path = ".", editable = true }
@@ -86,7 +88,11 @@ efficient_track_anything = { path = ".", editable = true }
 [tool.pixi.tasks]
 import-smoke = "python -c \"import efficient_track_anything.wrapper; print('efficient_track_anything import smoke passed')\""
 wrapper-smoke = "python -c \"from efficient_track_anything.wrapper import EfficientTrackAnythingWrapper; EfficientTrackAnythingWrapper(); print('efficient_track_anything wrapper smoke passed')\""
-cuda126-shell = { cmd = "bash", env = { CUDA_HOME = "/usr/local/cuda-12.6", CUDA_PATH = "/usr/local/cuda-12.6", CUDACXX = "/usr/local/cuda-12.6/bin/nvcc" } }
+
+[tool.pixi.tasks.cuda126-shell]
+cmd = '''
+bash -lc 'cuda_home=$(dirname "$(dirname "$(command -v nvcc)")"); export CUDA_HOME="$cuda_home"; export CUDA_PATH="$cuda_home"; export CUDACXX="$cuda_home/bin/nvcc"; echo "Using CUDA toolkit at $CUDA_HOME"; exec bash'
+'''
 
 [tool.pixi.system-requirements]
 cuda = "12.6"

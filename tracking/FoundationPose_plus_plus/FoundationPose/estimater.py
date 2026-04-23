@@ -15,46 +15,6 @@ from learning.training.predict_pose_refine import *
 import yaml
 
 
-def _rotation_geodesic_distance(R1, R2):
-  cos = (np.trace(R1 @ R2.T) - 1.0) / 2.0
-  cos = np.clip(cos, -1.0, 1.0)
-  return float(np.arccos(cos))
-
-
-def _cluster_poses_python(angle_diff, dist_diff, poses_in, symmetry_tfs):
-  """Fallback pose clustering when the optional mycpp extension is unavailable."""
-
-  poses_in = np.asarray(poses_in, dtype=np.float32)
-  symmetry_tfs = np.asarray(symmetry_tfs, dtype=np.float32)
-  if len(poses_in) == 0:
-    return poses_in
-
-  radian_thres = angle_diff / 180.0 * np.pi
-  poses_out = [poses_in[0]]
-
-  for i in range(1, len(poses_in)):
-    isnew = True
-    cur_pose = poses_in[i]
-    for cluster in poses_out:
-      if np.linalg.norm(cluster[:3, 3] - cur_pose[:3, 3]) >= dist_diff:
-        continue
-
-      for tf in symmetry_tfs:
-        cur_pose_tmp = cur_pose @ tf
-        rot_diff = _rotation_geodesic_distance(cur_pose_tmp[:3, :3], cluster[:3, :3])
-        if rot_diff < radian_thres:
-          isnew = False
-          break
-
-      if not isnew:
-        break
-
-    if isnew:
-      poses_out.append(cur_pose)
-
-  return np.asarray(poses_out, dtype=np.float32)
-
-
 class FoundationPose:
   def __init__(self, model_pts, model_normals, symmetry_tfs=None, mesh=None, scorer:ScorePredictor=None, refiner:PoseRefinePredictor=None, glctx=None, debug=0, debug_dir='./debug/novel_pose_debug/'):
     self.gt_pose = None
@@ -107,15 +67,7 @@ class FoundationPose:
     self.mesh = mesh
     if self.mesh is not None:
       self.mesh_path = f'/tmp/{uuid.uuid4()}.obj'
-      # FoundationPose only needs a temporary centered mesh on disk. When the
-      # source OBJ is textured, trimesh tries to emit sidecar MTL/texture files
-      # next to the export target, which can fail for nested or absolute asset
-      # paths. Export geometry only for this internal copy.
-      self.mesh.export(
-        self.mesh_path,
-        include_texture=False,
-        write_texture=False,
-      )
+      self.mesh.export(self.mesh_path)
     self.mesh_tensors = make_mesh_tensors(self.mesh)
 
     if symmetry_tfs is None:
@@ -165,11 +117,7 @@ class FoundationPose:
 
     rot_grid = np.asarray(rot_grid)
     logging.info(f"rot_grid:{rot_grid.shape}")
-    if mycpp is not None:
-      rot_grid = mycpp.cluster_poses(30, 99999, rot_grid, self.symmetry_tfs.data.cpu().numpy())
-    else:
-      logging.warning("mycpp extension is unavailable; using the slower Python pose clustering fallback.")
-      rot_grid = _cluster_poses_python(30, 99999, rot_grid, self.symmetry_tfs.data.cpu().numpy())
+    rot_grid = mycpp.cluster_poses(30, 99999, rot_grid, self.symmetry_tfs.data.cpu().numpy())
     rot_grid = np.asarray(rot_grid)
     logging.info(f"after cluster, rot_grid:{rot_grid.shape}")
     self.rot_grid = torch.as_tensor(rot_grid, device='cuda', dtype=torch.float)
@@ -338,3 +286,4 @@ class FoundationPose:
       extra['vis'] = vis
     self.pose_last = pose
     return (pose@self.get_tf_to_centered_mesh()).data.cpu().numpy().reshape(4,4)
+
