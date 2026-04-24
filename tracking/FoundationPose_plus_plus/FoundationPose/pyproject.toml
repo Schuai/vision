@@ -91,7 +91,7 @@ build-native = "bash -lc 'cd mycpp && mkdir -p build && cd build && cmake .. -DP
 
 [tool.pixi.tasks.ros2-pose-tracker-efficient-tam]
 cmd = """
-bash -lc 'export PYTHONPATH="$PWD/segmentation/sam2${PYTHONPATH:+:$PYTHONPATH}"; python -m src.ros2_pose_tracker --tracker efficient_tam --tracker-config configs/efficienttam/efficienttam_s_512x512.yaml --tracker-checkpoint checkpoints/efficienttam_s_512x512.pt --mesh-path demo_data/t_shape/t_shape.obj'
+bash -lc 'export PYTHONPATH="$PWD/segmentation/sam2${PYTHONPATH:+:$PYTHONPATH}"; python -m src.ros2_pose_tracker --tracker efficient_tam --tracker-config configs/efficienttam/efficienttam_s_512x512.yaml --tracker-checkpoint checkpoints/efficienttam_s_512x512.pt --mesh-path demo_data/t_shape/t_shape.obj --timing-report-every 1'
 """
 cwd = "../../.."
 

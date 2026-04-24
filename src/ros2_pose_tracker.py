@@ -131,6 +131,42 @@ class TrackingTimingBreakdown:
     visualization_ms: float = 0.0
 
 
+def compute_depth_confidence(
+    depth: np.ndarray,
+    rendered_depth: np.ndarray,
+    mask: np.ndarray | None = None,
+    erosion: int = 3,
+    method: str = "L1",
+    percentile: float = 90.0,
+) -> float:
+    """Compute the FoundationPose reference masked depth-confidence error."""
+
+    if mask is None:
+        mask = np.asarray(rendered_depth) > 0.1
+    else:
+        mask = np.asarray(mask).astype(bool) & (np.asarray(depth) > 0.1)
+
+    if int(mask.sum()) < 100:
+        return 1e6
+
+    if erosion > 0:
+        kernel = np.ones((erosion, erosion), dtype=np.uint8)
+        mask = cv2.erode(mask.astype(np.uint8), kernel, iterations=1).astype(bool)
+
+    pred = np.asarray(rendered_depth)[mask]
+    gt = np.asarray(depth)[mask]
+
+    if method == "L1":
+        dep_diff = np.abs(pred - gt)
+    elif method == "L2":
+        dep_diff = (pred - gt) ** 2
+    else:
+        raise ValueError(f"Unsupported depth confidence method: {method}")
+
+    dep_diff = dep_diff[dep_diff < np.percentile(dep_diff, percentile)]
+    return float(dep_diff.mean())
+
+
 @dataclass
 class BboxSelectionState:
     drawing: bool = False
@@ -159,6 +195,9 @@ TAB10_RGB = (
     (188, 189, 34),
     (23, 190, 207),
 )
+
+TRACKER_BBOX_COLOR_BGR = (255, 255, 0)
+POSE_BBOX_COLOR_BGR = (255, 0, 255)
 
 
 def _mask_rgba_for_object(obj_id: int | None) -> np.ndarray:
@@ -739,11 +778,17 @@ class LiveObjectPoseTrackerNode:
         self.pending_init_camera_matrix: np.ndarray | None = None
         self.pending_init_segmentation: SegmentationResult | None = None
         self.pending_init_bbox_xywh: list[float] | None = None
-        self.last_visualization_time: float | None = None
         self.last_visualization_render_time: float | None = None
-        self.visualization_fps = 0.0
         self.visualization_rate_hz = max(0.0, args.visualization_rate_hz)
-        self.tracking_window_canvas: np.ndarray | None = None
+        self.visualization_window_scale = max(1.0, args.visualization_window_scale)
+        self.tracking_stats_fps = 0.0
+        self.pose_depth_error_m: float | None = None
+        self.pose_depth_renderer: Any | None = None
+        self.pose_depth_renderer_shape: tuple[int, int] | None = None
+        self.pose_depth_renderer_camera_matrix: np.ndarray | None = None
+        self.pose_depth_cvcam_in_glcam: np.ndarray | None = None
+        self.pose_depth_renderer_disabled = False
+        self.foundationpose_needs_register = False
         self.log_timing = args.log_timing
         self.timing_report_every = max(1, args.timing_report_every)
         self.timing_breakdown_sums = TrackingTimingBreakdown()
@@ -844,6 +889,11 @@ class LiveObjectPoseTrackerNode:
             self.node.get_logger().info(
                 f"Visualization refresh is capped at {self.visualization_rate_hz:.1f} Hz to reduce display overhead."
             )
+        if args.retrack_on_low_confidence:
+            self.node.get_logger().info(
+                "Low-confidence re-registration enabled with "
+                f"max depth error={args.pose_depth_error_threshold:.3f} m."
+            )
         self.node.get_logger().info(
             "A live RGB window will appear. Press 'e' to enter edit mode, draw a box, then press 'e' again to confirm initialization."
         )
@@ -890,6 +940,157 @@ class LiveObjectPoseTrackerNode:
                 if torch.is_tensor(value) and value.device != target_device:
                     mesh_tensors[key] = value.to(device=target_device)
 
+    def _reset_kalman_from_estimator(self) -> None:
+        estimator = self.foundationpose.get()
+        if self.kalman_filter is None or getattr(estimator, "pose_last", None) is None:
+            return
+        self.kf_mean, self.kf_covariance = self.kalman_filter.initiate(
+            get_6d_pose_arr_from_mat(estimator.pose_last)
+        )
+
+    def _register_foundationpose_from_mask(
+        self,
+        color_rgb: np.ndarray,
+        depth_m: np.ndarray,
+        camera_matrix: np.ndarray,
+        segmentation: SegmentationResult,
+    ) -> np.ndarray:
+        try:
+            pose = self.foundationpose.register(
+                rgb=color_rgb,
+                depth=depth_m,
+                camera_matrix=camera_matrix,
+                object_mask=segmentation.mask.astype(np.uint8) * 255,
+                iteration=self.args.est_refine_iter,
+            )
+        finally:
+            restore_torch_cpu_default_tensor_type()
+
+        self._normalize_foundationpose_state(self.foundationpose.get())
+        self._reset_kalman_from_estimator()
+        return np.asarray(pose, dtype=np.float32).reshape(4, 4)
+
+    def _destroy_pose_depth_renderer(self) -> None:
+        renderer = self.pose_depth_renderer
+        if renderer is not None:
+            offscreen_renderer = getattr(renderer, "r", None)
+            delete = getattr(offscreen_renderer, "delete", None)
+            if callable(delete):
+                with contextlib.suppress(Exception):
+                    delete()
+        self.pose_depth_renderer = None
+        self.pose_depth_renderer_shape = None
+        self.pose_depth_renderer_camera_matrix = None
+        self.pose_depth_cvcam_in_glcam = None
+
+    def _get_pose_depth_renderer(self, camera_matrix: np.ndarray, image_shape: tuple[int, int]) -> Any | None:
+        if self.pose_depth_renderer_disabled:
+            return None
+
+        camera_matrix = self._as_float32_camera_matrix(camera_matrix)
+        height, width = (int(image_shape[0]), int(image_shape[1]))
+        shape = (height, width)
+        if (
+            self.pose_depth_renderer is not None
+            and self.pose_depth_renderer_shape == shape
+            and self.pose_depth_renderer_camera_matrix is not None
+            and np.allclose(self.pose_depth_renderer_camera_matrix, camera_matrix)
+        ):
+            return self.pose_depth_renderer
+
+        self._destroy_pose_depth_renderer()
+        try:
+            from offscreen_renderer import ModelRendererOffscreen, cvcam_in_glcam
+
+            renderer = ModelRendererOffscreen(cam_K=camera_matrix, H=height, W=width, zfar=self.args.pose_depth_zfar)
+            renderer.add_mesh(self.foundationpose.mesh)
+        except Exception as exc:
+            self.pose_depth_renderer_disabled = True
+            self.node.get_logger().warning(
+                "Pose depth-confidence rendering is unavailable; "
+                f"low-confidence re-registration is disabled. Error: {exc}"
+            )
+            return None
+
+        self.pose_depth_renderer = renderer
+        self.pose_depth_renderer_shape = shape
+        self.pose_depth_renderer_camera_matrix = camera_matrix.copy()
+        self.pose_depth_cvcam_in_glcam = np.asarray(cvcam_in_glcam, dtype=np.float32)
+        return renderer
+
+    def _compute_pose_depth_error(
+        self,
+        pose: np.ndarray,
+        depth_m: np.ndarray,
+        camera_matrix: np.ndarray,
+        segmentation: SegmentationResult,
+    ) -> float | None:
+        if not self.args.retrack_on_low_confidence:
+            return None
+
+        renderer = self._get_pose_depth_renderer(camera_matrix, depth_m.shape[:2])
+        if renderer is None or self.pose_depth_cvcam_in_glcam is None:
+            return None
+
+        pose_matrix = np.asarray(pose, dtype=np.float32).reshape(4, 4)
+        try:
+            renderer.set_cam_pose(np.linalg.inv(self.pose_depth_cvcam_in_glcam @ pose_matrix))
+            _, rendered_depth_m = renderer.render(get_normal=False)
+        except Exception as exc:
+            self.pose_depth_renderer_disabled = True
+            self._destroy_pose_depth_renderer()
+            self.node.get_logger().warning(
+                "Pose depth-confidence rendering failed; "
+                f"low-confidence re-registration is disabled. Error: {exc}"
+            )
+            return None
+
+        return compute_depth_confidence(
+            depth=depth_m,
+            rendered_depth=rendered_depth_m,
+            mask=segmentation.mask,
+            erosion=self.args.pose_depth_confidence_erosion,
+            method=self.args.pose_depth_confidence_method,
+            percentile=self.args.pose_depth_confidence_percentile,
+        )
+
+    def _mask_area(self, segmentation: SegmentationResult) -> int:
+        return int(np.asarray(segmentation.mask, dtype=bool).sum())
+
+    def _mark_reregister_if_low_confidence(
+        self,
+        pose: np.ndarray,
+        depth_m: np.ndarray,
+        camera_matrix: np.ndarray,
+        segmentation: SegmentationResult,
+    ) -> np.ndarray:
+        pose_depth_error = self._compute_pose_depth_error(
+            pose=pose,
+            depth_m=depth_m,
+            camera_matrix=camera_matrix,
+            segmentation=segmentation,
+        )
+        self.pose_depth_error_m = pose_depth_error
+        if pose_depth_error is None or pose_depth_error <= self.args.pose_depth_error_threshold:
+            return pose
+
+        mask_area = self._mask_area(segmentation)
+        if mask_area < self.args.retrack_min_mask_area:
+            self.node.get_logger().warning(
+                "Pose confidence is low, but the 2D tracker mask is too small to restart FoundationPose from register: "
+                f"depth_error={pose_depth_error:.4f} m, mask_area={mask_area} px."
+            )
+            return pose
+
+        self.foundationpose_needs_register = True
+        self.node.get_logger().warning(
+            "Pose confidence is low; the next FoundationPose step will restart from register using the 2D tracker mask: "
+            f"depth_error={pose_depth_error:.4f} m, "
+            f"threshold={self.args.pose_depth_error_threshold:.4f} m, "
+            f"mask_area={mask_area} px."
+        )
+        return pose
+
     def _apply_kalman_filter_to_pose_last(
         self,
         estimator: object,
@@ -924,9 +1125,6 @@ class LiveObjectPoseTrackerNode:
         estimator.pose_last = pose_tensor_from_6d_pose_arr(self.kf_mean[:6], estimator.pose_last)
 
     def _record_tracking_timing(self, breakdown: TrackingTimingBreakdown) -> None:
-        if not self.log_timing:
-            return
-
         self.timing_breakdown_sums.total_ms += breakdown.total_ms
         self.timing_breakdown_sums.two_d_tracker_ms += breakdown.two_d_tracker_ms
         self.timing_breakdown_sums.kalman_ms += breakdown.kalman_ms
@@ -947,18 +1145,20 @@ class LiveObjectPoseTrackerNode:
             publish_ms=self.timing_breakdown_sums.publish_ms / n,
             visualization_ms=self.timing_breakdown_sums.visualization_ms / n,
         )
-        fps_str = f"{1000.0 / averages.total_ms:.2f}" if averages.total_ms > 1e-6 else "inf"
-        self.node.get_logger().info(
-            "Tracking timing over the last "
-            f"{self.timing_breakdown_count} frames: "
-            f"total={averages.total_ms:.1f} ms, "
-            f"2d_tracker={averages.two_d_tracker_ms:.1f} ms, "
-            f"kalman={averages.kalman_ms:.1f} ms, "
-            f"foundationpose={averages.foundationpose_ms:.1f} ms, "
-            f"publish={averages.publish_ms:.1f} ms, "
-            f"visualization={averages.visualization_ms:.1f} ms, "
-            f"fps={fps_str}"
-        )
+        self.tracking_stats_fps = 1000.0 / averages.total_ms if averages.total_ms > 1e-6 else float("inf")
+        fps_str = self._format_tracking_stats_fps()
+        if self.log_timing:
+            self.node.get_logger().info(
+                "Tracking timing over the last "
+                f"{self.timing_breakdown_count} frames: "
+                f"total={averages.total_ms:.1f} ms, "
+                f"2d_tracker={averages.two_d_tracker_ms:.1f} ms, "
+                f"kalman={averages.kalman_ms:.1f} ms, "
+                f"foundationpose={averages.foundationpose_ms:.1f} ms, "
+                f"publish={averages.publish_ms:.1f} ms, "
+                f"visualization={averages.visualization_ms:.1f} ms, "
+                f"fps={fps_str}"
+            )
         self.timing_breakdown_sums = TrackingTimingBreakdown()
         self.timing_breakdown_count = 0
 
@@ -1030,47 +1230,93 @@ class LiveObjectPoseTrackerNode:
             estimator = self.foundationpose.get()
             self._normalize_foundationpose_state(estimator)
             bbox = segmentation.bbox_xywh
-            camera_matrix_tensor = torch.as_tensor(
-                camera_matrix,
-                device=estimator.pose_last.device,
-                dtype=estimator.pose_last.dtype,
-            )
-            if self.kalman_filter is not None:
-                step_start_time = time.perf_counter()
-                self._apply_kalman_filter_to_pose_last(
-                    estimator=estimator,
-                    camera_matrix_tensor=camera_matrix_tensor,
-                    bbox_xywh=bbox,
-                )
-                timing_breakdown.kalman_ms = (time.perf_counter() - step_start_time) * 1000.0
-            elif bbox[2] > 0 and bbox[3] > 0:
-                estimator.pose_last = adjust_pose_to_image_point(
-                    ob_in_cam=estimator.pose_last,
-                    camera_matrix=camera_matrix_tensor,
-                    x=float(bbox[0] + bbox[2] / 2.0),
-                    y=float(bbox[1] + bbox[3] / 2.0),
-                )
-
-            try:
-                maybe_cuda_synchronize(self.args.device)
-                step_start_time = time.perf_counter()
-                pose = self.foundationpose.track_one(
-                    rgb=color_rgb,
-                    depth=depth_m,
-                    camera_matrix=camera_matrix,
-                    iteration=self.args.track_refine_iter,
-                )
-                maybe_cuda_synchronize(self.args.device)
-                timing_breakdown.foundationpose_ms = (time.perf_counter() - step_start_time) * 1000.0
-                if self.kalman_filter is not None and self.kf_mean is not None and self.kf_covariance is not None:
-                    step_start_time = time.perf_counter()
-                    self.kf_mean, self.kf_covariance = self.kalman_filter.predict(
-                        self.kf_mean,
-                        self.kf_covariance,
+            if self.foundationpose_needs_register:
+                mask_area = self._mask_area(segmentation)
+                if mask_area < self.args.retrack_min_mask_area:
+                    self.node.get_logger().warning(
+                        "Waiting to re-register FoundationPose, but the current 2D tracker mask is too small: "
+                        f"mask_area={mask_area} px."
                     )
-                    timing_breakdown.kalman_ms += (time.perf_counter() - step_start_time) * 1000.0
-            finally:
-                restore_torch_cpu_default_tensor_type()
+                    return
+
+                try:
+                    maybe_cuda_synchronize(self.args.device)
+                    step_start_time = time.perf_counter()
+                    pose = self._register_foundationpose_from_mask(
+                        color_rgb=color_rgb,
+                        depth_m=depth_m,
+                        camera_matrix=camera_matrix,
+                        segmentation=segmentation,
+                    )
+                    self.foundationpose_needs_register = False
+                    self.pose_depth_error_m = self._compute_pose_depth_error(
+                        pose=pose,
+                        depth_m=depth_m,
+                        camera_matrix=camera_matrix,
+                        segmentation=segmentation,
+                    )
+                    maybe_cuda_synchronize(self.args.device)
+                    timing_breakdown.foundationpose_ms = (time.perf_counter() - step_start_time) * 1000.0
+                finally:
+                    restore_torch_cpu_default_tensor_type()
+                if self.pose_depth_error_m is not None:
+                    self.node.get_logger().info(
+                        f"FoundationPose re-registered from the 2D tracker mask; "
+                        f"depth_error={self.pose_depth_error_m:.4f} m."
+                    )
+            else:
+                camera_matrix_tensor = torch.as_tensor(
+                    camera_matrix,
+                    device=estimator.pose_last.device,
+                    dtype=estimator.pose_last.dtype,
+                )
+                if self.kalman_filter is not None:
+                    step_start_time = time.perf_counter()
+                    self._apply_kalman_filter_to_pose_last(
+                        estimator=estimator,
+                        camera_matrix_tensor=camera_matrix_tensor,
+                        bbox_xywh=bbox,
+                    )
+                    timing_breakdown.kalman_ms = (time.perf_counter() - step_start_time) * 1000.0
+                elif bbox[2] > 0 and bbox[3] > 0:
+                    estimator.pose_last = adjust_pose_to_image_point(
+                        ob_in_cam=estimator.pose_last,
+                        camera_matrix=camera_matrix_tensor,
+                        x=float(bbox[0] + bbox[2] / 2.0),
+                        y=float(bbox[1] + bbox[3] / 2.0),
+                    )
+
+                try:
+                    maybe_cuda_synchronize(self.args.device)
+                    step_start_time = time.perf_counter()
+                    pose = self.foundationpose.track_one(
+                        rgb=color_rgb,
+                        depth=depth_m,
+                        camera_matrix=camera_matrix,
+                        iteration=self.args.track_refine_iter,
+                    )
+                    pose = self._mark_reregister_if_low_confidence(
+                        pose=pose,
+                        depth_m=depth_m,
+                        camera_matrix=camera_matrix,
+                        segmentation=segmentation,
+                    )
+                    maybe_cuda_synchronize(self.args.device)
+                    timing_breakdown.foundationpose_ms = (time.perf_counter() - step_start_time) * 1000.0
+                    if (
+                        self.kalman_filter is not None
+                        and self.kf_mean is not None
+                        and self.kf_covariance is not None
+                        and not self.foundationpose_needs_register
+                    ):
+                        step_start_time = time.perf_counter()
+                        self.kf_mean, self.kf_covariance = self.kalman_filter.predict(
+                            self.kf_mean,
+                            self.kf_covariance,
+                        )
+                        timing_breakdown.kalman_ms += (time.perf_counter() - step_start_time) * 1000.0
+                finally:
+                    restore_torch_cpu_default_tensor_type()
 
         frame_id = (
             camera_info_msg.header.frame_id
@@ -1129,7 +1375,6 @@ class LiveObjectPoseTrackerNode:
                     )
                 return
 
-        self._update_visualization_fps()
         self._show_visualization_window(
             self._build_tracking_window_frame(color_rgb, segmentation, pose, camera_matrix)
         )
@@ -1142,17 +1387,19 @@ class LiveObjectPoseTrackerNode:
             self._destroy_visualization_window()
             self.node.get_logger().info("Visualization hidden by user input. Tracking continues in the background.")
 
-    def _update_visualization_fps(self) -> None:
-        now = time.time()
-        if self.last_visualization_time is not None:
-            dt = now - self.last_visualization_time
-            if dt > 1e-6:
-                instantaneous_fps = 1.0 / dt
-                if self.visualization_fps <= 0.0:
-                    self.visualization_fps = instantaneous_fps
-                else:
-                    self.visualization_fps = 0.85 * self.visualization_fps + 0.15 * instantaneous_fps
-        self.last_visualization_time = now
+    def _format_tracking_stats_fps(self) -> str:
+        if self.tracking_stats_fps <= 0.0:
+            return "--"
+        if not np.isfinite(self.tracking_stats_fps):
+            return "inf"
+        return f"{self.tracking_stats_fps:.2f}"
+
+    def _format_pose_depth_error(self) -> str:
+        if self.pose_depth_error_m is None:
+            return "--"
+        if not np.isfinite(self.pose_depth_error_m):
+            return "inf"
+        return f"{self.pose_depth_error_m:.3f} m"
 
     def _annotate_frame_in_place(self, frame_bgr: np.ndarray, lines: list[str]) -> np.ndarray:
         y = 30
@@ -1170,7 +1417,14 @@ class LiveObjectPoseTrackerNode:
             y += 32
         return frame_bgr
 
+    def _resize_window_for_frame(self, window_name: str, frame_bgr: np.ndarray) -> None:
+        height, width = frame_bgr.shape[:2]
+        target_width = max(1, int(round(width * self.visualization_window_scale)))
+        target_height = max(1, int(round(height * self.visualization_window_scale)))
+        cv2.resizeWindow(window_name, target_width, target_height)
+
     def _show_visualization_window(self, frame_bgr: np.ndarray) -> None:
+        window_created = False
         if self.visualization_window_visible:
             try:
                 if cv2.getWindowProperty(self.visualization_window_name, cv2.WND_PROP_VISIBLE) < 1:
@@ -1191,10 +1445,14 @@ class LiveObjectPoseTrackerNode:
         if not self.visualization_window_visible:
             cv2.namedWindow(self.visualization_window_name, cv2.WINDOW_NORMAL)
             self.visualization_window_visible = True
+            window_created = True
 
         cv2.imshow(self.visualization_window_name, frame_bgr)
+        if window_created:
+            self._resize_window_for_frame(self.visualization_window_name, frame_bgr)
 
     def _show_edit_window(self, frame_bgr: np.ndarray) -> None:
+        window_created = False
         if self.edit_window_visible:
             try:
                 if cv2.getWindowProperty(self.edit_window_name, cv2.WND_PROP_VISIBLE) < 1:
@@ -1208,8 +1466,11 @@ class LiveObjectPoseTrackerNode:
             cv2.namedWindow(self.edit_window_name, cv2.WINDOW_NORMAL)
             cv2.setMouseCallback(self.edit_window_name, draw_rectangle, self.selection_state)
             self.edit_window_visible = True
+            window_created = True
 
         cv2.imshow(self.edit_window_name, frame_bgr)
+        if window_created:
+            self._resize_window_for_frame(self.edit_window_name, frame_bgr)
 
     def _destroy_visualization_window(self) -> None:
         if not self.visualization_window_visible:
@@ -1233,7 +1494,7 @@ class LiveObjectPoseTrackerNode:
 
     def _build_live_window_frame(self, color_rgb: np.ndarray) -> np.ndarray:
         frame_bgr = cv2.cvtColor(color_rgb, cv2.COLOR_RGB2BGR)
-        lines = [f"FPS: {self.visualization_fps:.2f}"]
+        lines = [f"Tracking FPS: {self._format_tracking_stats_fps()}"]
         if self.edit_mode:
             lines.append("Edit mode active")
             if self.pending_init_segmentation is not None:
@@ -1244,55 +1505,75 @@ class LiveObjectPoseTrackerNode:
             lines.append("Press 'e' to enter edit mode")
         return self._annotate_frame_in_place(frame_bgr, lines)
 
-    def _build_reference_pose_panel(
+    def _draw_bbox_label(
         self,
-        base_bgr: np.ndarray,
+        frame_bgr: np.ndarray,
+        text: str,
+        origin: tuple[int, int],
+        color: tuple[int, int, int],
+    ) -> None:
+        x, y = origin
+        y = max(18, y)
+        cv2.putText(
+            frame_bgr,
+            text,
+            (max(0, x), y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+
+    def _draw_reference_pose_overlay_in_place(
+        self,
+        frame_bgr: np.ndarray,
         pose: np.ndarray,
         camera_matrix: np.ndarray,
-    ) -> np.ndarray:
+    ) -> None:
         reference_pose = np.asarray(pose, dtype=np.float32).reshape(4, 4) @ self.reference_pose_transform
-        pose_overlay_bgr = base_bgr.copy()
-        draw_pose_box_on_image(
-            pose_overlay_bgr,
-            object_pose_in_camera=reference_pose,
-            camera_matrix=camera_matrix,
-            object_bbox=self.reference_bbox,
-            color=(0, 255, 0),
-            thickness=3,
-        )
         draw_pose_axes_on_image(
-            pose_overlay_bgr,
+            frame_bgr,
             object_pose_in_camera=reference_pose,
             camera_matrix=camera_matrix,
             axis_scale=self.reference_pose_axis_scale,
             thickness=3,
         )
         draw_pose_box_on_image(
-            pose_overlay_bgr,
+            frame_bgr,
             object_pose_in_camera=reference_pose,
             camera_matrix=camera_matrix,
             object_bbox=self.reference_bbox,
-            color=(0, 255, 0),
+            color=POSE_BBOX_COLOR_BGR,
             thickness=3,
         )
-        return pose_overlay_bgr
-
-    def _compose_tracking_window_frame(
-        self,
-        left_bgr: np.ndarray,
-        middle_bgr: np.ndarray,
-        right_bgr: np.ndarray,
-    ) -> np.ndarray:
-        panel_height, panel_width = left_bgr.shape[:2]
-        canvas_shape = (panel_height, panel_width * 3, 3)
-        if self.tracking_window_canvas is None or self.tracking_window_canvas.shape != canvas_shape:
-            self.tracking_window_canvas = np.empty(canvas_shape, dtype=np.uint8)
-
-        canvas = self.tracking_window_canvas
-        canvas[:, :panel_width] = left_bgr
-        canvas[:, panel_width : 2 * panel_width] = middle_bgr
-        canvas[:, 2 * panel_width :] = right_bgr
-        return canvas
+        min_xyz, max_xyz = np.asarray(self.reference_bbox, dtype=np.float32).reshape(2, 3)
+        corners = np.asarray(
+            [
+                [min_xyz[0], min_xyz[1], min_xyz[2]],
+                [max_xyz[0], min_xyz[1], min_xyz[2]],
+                [max_xyz[0], max_xyz[1], min_xyz[2]],
+                [min_xyz[0], max_xyz[1], min_xyz[2]],
+                [min_xyz[0], min_xyz[1], max_xyz[2]],
+                [max_xyz[0], min_xyz[1], max_xyz[2]],
+                [max_xyz[0], max_xyz[1], max_xyz[2]],
+                [min_xyz[0], max_xyz[1], max_xyz[2]],
+            ],
+            dtype=np.float32,
+        )
+        pixels, valid = project_object_points(corners, reference_pose, camera_matrix)
+        image_height, image_width = frame_bgr.shape[:2]
+        visible = (
+            valid
+            & (pixels[:, 0] >= 0)
+            & (pixels[:, 0] < image_width)
+            & (pixels[:, 1] >= 0)
+            & (pixels[:, 1] < image_height)
+        )
+        if visible.any():
+            visible_pixels = pixels[visible]
+            label_origin = (int(visible_pixels[:, 0].min()), int(visible_pixels[:, 1].min()) - 8)
+            self._draw_bbox_label(frame_bgr, "6D", label_origin, POSE_BBOX_COLOR_BGR)
 
     def _build_tracking_window_frame(
         self,
@@ -1302,21 +1583,22 @@ class LiveObjectPoseTrackerNode:
         camera_matrix: np.ndarray,
     ) -> np.ndarray:
         base_bgr = cv2.cvtColor(color_rgb, cv2.COLOR_RGB2BGR)
-        left = base_bgr.copy()
-        overlay_bgr = show_mask(base_bgr, segmentation.mask, obj_id=self.args.object_id)
+        frame_bgr = show_mask(base_bgr, segmentation.mask, obj_id=self.args.object_id)
         bbox = segmentation.bbox_xywh
         if bbox[2] > 0 and bbox[3] > 0:
             x, y, width, height = (int(v) for v in bbox)
-            cv2.rectangle(overlay_bgr, (x, y), (x + width, y + height), (0, 255, 0), 2)
-        pose_overlay_bgr = self._build_reference_pose_panel(base_bgr=base_bgr, pose=pose, camera_matrix=camera_matrix)
-
-        self._annotate_frame_in_place(left, [f"RGB  FPS: {self.visualization_fps:.2f}"])
-        self._annotate_frame_in_place(overlay_bgr, ["2D Tracker Overlay"])
+            cv2.rectangle(frame_bgr, (x, y), (x + width, y + height), TRACKER_BBOX_COLOR_BGR, 2)
+            self._draw_bbox_label(frame_bgr, "2D", (x, y - 8), TRACKER_BBOX_COLOR_BGR)
+        self._draw_reference_pose_overlay_in_place(frame_bgr=frame_bgr, pose=pose, camera_matrix=camera_matrix)
         self._annotate_frame_in_place(
-            pose_overlay_bgr,
-            ["Reference Pose Overlay", "6D pose + oriented bbox", "Press q/Esc to hide visualization"],
+            frame_bgr,
+            [
+                f"Tracking FPS: {self._format_tracking_stats_fps()}",
+                f"Pose depth error: {self._format_pose_depth_error()}",
+                "Press q/Esc to hide visualization",
+            ],
         )
-        return self._compose_tracking_window_frame(left, overlay_bgr, pose_overlay_bgr)
+        return frame_bgr
 
     def _build_edit_window_frame(self) -> np.ndarray:
         if self.pending_init_color_rgb is None:
@@ -1408,6 +1690,7 @@ class LiveObjectPoseTrackerNode:
     def shutdown(self) -> None:
         self._destroy_edit_window()
         self._destroy_visualization_window()
+        self._destroy_pose_depth_renderer()
         self.node.destroy_node()
 
     def _try_initialize_from_live_bbox(
@@ -1415,8 +1698,7 @@ class LiveObjectPoseTrackerNode:
         color_rgb: np.ndarray,
         depth_m: np.ndarray,
         camera_matrix: np.ndarray,
-    ) -> tuple[SegmentationResult, torch.Tensor] | None:
-        self._update_visualization_fps()
+    ) -> tuple[SegmentationResult, np.ndarray] | None:
         self._show_visualization_window(self._build_live_window_frame(color_rgb))
 
         if not self.init_prompt_logged:
@@ -1452,23 +1734,20 @@ class LiveObjectPoseTrackerNode:
             self.node.get_logger().info("Draw a bounding box before confirming initialization.")
             return None
 
-        try:
-            pose = self.foundationpose.register(
-                rgb=self.pending_init_color_rgb,
-                depth=self.pending_init_depth_m,
-                camera_matrix=self.pending_init_camera_matrix,
-                object_mask=self.pending_init_segmentation.mask.astype(np.uint8) * 255,
-                iteration=self.args.est_refine_iter,
-            )
-        finally:
-            restore_torch_cpu_default_tensor_type()
-        self._normalize_foundationpose_state(self.foundationpose.get())
-        estimator = self.foundationpose.get()
-        if self.kalman_filter is not None and getattr(estimator, "pose_last", None) is not None:
-            self.kf_mean, self.kf_covariance = self.kalman_filter.initiate(
-                get_6d_pose_arr_from_mat(estimator.pose_last)
-            )
         segmentation = self.pending_init_segmentation
+        pose = self._register_foundationpose_from_mask(
+            color_rgb=self.pending_init_color_rgb,
+            depth_m=self.pending_init_depth_m,
+            camera_matrix=self.pending_init_camera_matrix,
+            segmentation=segmentation,
+        )
+        self.foundationpose_needs_register = False
+        self.pose_depth_error_m = self._compute_pose_depth_error(
+            pose=pose,
+            depth_m=self.pending_init_depth_m,
+            camera_matrix=self.pending_init_camera_matrix,
+            segmentation=segmentation,
+        )
         self.initialized = True
         self._cancel_edit_mode("")
         self.node.get_logger().info("Tracker initialized from the user-confirmed edit-mode bounding box.")
@@ -1535,6 +1814,54 @@ def build_argparser() -> argparse.ArgumentParser:
         type=float,
         default=10.0,
         help="Cap live visualization refresh to this rate to reduce display overhead. Use 0 to redraw every frame.",
+    )
+    parser.add_argument(
+        "--visualization-window-scale",
+        type=float,
+        default=1.5,
+        help="Initial OpenCV visualization window scale relative to the rendered frame size.",
+    )
+    parser.add_argument(
+        "--retrack-on-low-confidence",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Restart the next FoundationPose loop from register when masked rendered-depth error is too high.",
+    )
+    parser.add_argument(
+        "--pose-depth-error-threshold",
+        type=float,
+        default=0.05,
+        help="Depth L1 error threshold in meters for low-confidence pose re-registration.",
+    )
+    parser.add_argument(
+        "--retrack-min-mask-area",
+        type=int,
+        default=100,
+        help="Minimum 2D tracker mask area in pixels required before automatic re-registration.",
+    )
+    parser.add_argument(
+        "--pose-depth-confidence-erosion",
+        type=int,
+        default=3,
+        help="Mask erosion kernel size used before computing the pose depth-confidence error.",
+    )
+    parser.add_argument(
+        "--pose-depth-confidence-method",
+        choices=["L1", "L2"],
+        default="L1",
+        help="Depth difference method used for pose confidence, matching the FoundationPose reference.",
+    )
+    parser.add_argument(
+        "--pose-depth-confidence-percentile",
+        type=float,
+        default=90.0,
+        help="Upper percentile cutoff for masked pose depth-error outlier rejection.",
+    )
+    parser.add_argument(
+        "--pose-depth-zfar",
+        type=float,
+        default=10.0,
+        help="Far clipping plane in meters for the offscreen pose-confidence depth renderer.",
     )
     parser.add_argument("--debug-dir", type=str, default="./debug/foundationpose_ros2")
     return parser

@@ -1616,7 +1616,7 @@ packages:
 - pypi: ../../../segmentation/efficient_track_anything
   name: efficient-track-anything
   version: '1.0'
-  sha256: 33509b9deac1499482a1a0a4e9de44af3a3ab566164aff91cd4a1f9fdf6e0952
+  sha256: 9921d7ee1e97396c242624b9ff61028aac3f20424fed5d498df37072f2dc0401
   requires_dist:
   - torch>=2.4,<2.7
   - torchvision>=0.19,<0.22
@@ -1971,7 +1971,7 @@ packages:
 - pypi: ./
   name: foundationpose-wrapper
   version: 0.1.0
-  sha256: 669952c62163e650d47ad97aff3eee738cc660d745e1a45b266df76ab69a0610
+  sha256: 9ee6c2f470a4e73997c0d644c85f16ec6b0c2bef1e902ac68a26f4b074bb645d
   requires_dist:
   - torch==2.4.1
   - torchvision==0.19.1

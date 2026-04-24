@@ -207,6 +207,8 @@ Run the tracker with EfficientTAM in a second terminal:
 pixi run ros2-pose-tracker-efficient-tam
 ```
 
+Use the task above instead of running `pixi run python -m src.ros2_pose_tracker ...` directly from the repository root. The root Pixi environment does not install `foundationpose_wrapper`, so direct root-environment launches will fail with `ModuleNotFoundError: No module named 'foundationpose_wrapper'`.
+
 The root task delegates to the dedicated FoundationPose Pixi environment and runs:
 
 - `src.ros2_pose_tracker`
@@ -214,5 +216,16 @@ The root task delegates to the dedicated FoundationPose Pixi environment and run
 - `--tracker-config configs/efficienttam/efficienttam_s_512x512.yaml`
 - `--tracker-checkpoint checkpoints/efficienttam_s_512x512.pt`
 - `--mesh-path demo_data/t_shape/t_shape.obj`
+- `--timing-report-every 1`
+
+For an ad-hoc launch with custom arguments, explicitly select the FoundationPose manifest and preserve the SAM2 source path:
+
+```bash
+pixi run -m tracking/FoundationPose_plus_plus/FoundationPose bash -lc 'export PYTHONPATH="$PWD/segmentation/sam2${PYTHONPATH:+:$PYTHONPATH}"; python -m src.ros2_pose_tracker --tracker efficient_tam --tracker-config configs/efficienttam/efficienttam_s_512x512.yaml --tracker-checkpoint checkpoints/efficienttam_s_512x512.pt --mesh-path demo_data/t_shape/t_shape.obj --timing-report-every 1'
+```
 
 The tracker no longer takes an initialization mask or bbox from the command line. After startup, focus the RGB window, press `e` to enter edit mode, draw the initialization box, then press `e` again to confirm and start tracking. If `mycpp` is unavailable, `src.ros2_pose_tracker` falls back to an unclustered rotation-grid path, but `build-native` is the recommended setup.
+
+The OpenCV visualization and edit windows open at `1.5x` the rendered frame size by default. Pass `--visualization-window-scale 2.0` in a custom launch command if you want them larger.
+
+During tracking, the node checks FoundationPose confidence by rendering the current 6D pose and comparing rendered depth against the camera depth inside the 2D tracker mask. If the masked depth error is above `--pose-depth-error-threshold 0.05`, the next FoundationPose loop restarts from `register(...)` using the current 2D tracker mask; the 2D tracker itself is not reinitialized. The Kalman filter is reinitialized from the registered pose. Use `--no-retrack-on-low-confidence` to disable this recovery path.
