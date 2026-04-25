@@ -52,56 +52,62 @@ python -m src.pipeline --help
 
 Plain `pixi run ...` uses the default Jazzy environment. For Humble, use `pixi run -e humble-cuda124 ...`.
 
-Quick checks:
+### Tracking ROS2 Package
+
+Build the dedicated tracking package from a Pixi shell:
 
 ```bash
-pixi run import-smoke
-pixi run wrapper-smoke
-pixi run ros-smoke
-pixi run pipeline-dry-run
-pixi run env-diagnostics
-pixi run env-diagnostics-jazzy
-pixi run -e humble-cuda124 ros-smoke
-pixi run -e humble-cuda124 env-diagnostics
-pixi run env-diagnostics-humble
+pixi run ros2-tracking-build
+source ros2/tracking/install/setup.bash
 ```
 
-What these do:
+Start the publisher with:
 
-- `import-smoke`: verifies the root env can import `efficient_track_anything.wrapper` and `sam2.wrapper`
-- `wrapper-smoke`: instantiates the two root-env tracker wrappers without loading model weights
-- `ros-smoke`: verifies the selected root ROS2 environment can import `rclpy` and core message types
-- `pipeline-dry-run`: starts the root integration entrypoint and prints wrapper status
-- `env-diagnostics`: prints the active Python path, PyTorch version, CUDA runtime version, active `nvcc` path, and the derived CUDA toolkit root for the currently selected environment
-- `env-diagnostics-jazzy`: runs the same diagnostics in `jazzy-cuda126`
-- `env-diagnostics-humble`: runs the same diagnostics in `humble-cuda124`
+```bash
+ros2 run tracking realsense_publisher --serial-number 251622061129
+```
+
+Start segmentation tracking from the publisher's RGB stream. If no prompt is passed, the first RGB frame opens in a prompt window for bbox selection:
+
+```bash
+ros2 run tracking run_segmentation
+```
+
+Publish an annotated image for RViz from the RGB stream and segmentation bbox:
+
+```bash
+ros2 run tracking visualization
+```
+
+In RViz, add an `Image` display and select `/tracking/visualization/image`.
+
+For a packaging/import check without starting streams:
+
+```bash
+ros2 run tracking realsense_publisher --help
+ros2 run tracking realsense_publisher --list-devices
+```
 
 ### Standalone Submodule Environments
 
-Each submodule can also be installed and tested independently.
+Each submodule can also be installed independently.
 
 #### Efficient Track Anything
 
 ```bash
 pixi install -m segmentation/efficient_track_anything
-pixi run -m segmentation/efficient_track_anything import-smoke
-pixi run -m segmentation/efficient_track_anything wrapper-smoke
 ```
 
 #### SAM2
 
 ```bash
 pixi install -m segmentation/sam2
-pixi run -m segmentation/sam2 import-smoke
-pixi run -m segmentation/sam2 wrapper-smoke
 ```
 
 #### FoundationPose
 
 ```bash
 pixi install -m tracking/FoundationPose_plus_plus/FoundationPose
-pixi run -m tracking/FoundationPose_plus_plus/FoundationPose import-smoke
-pixi run -m tracking/FoundationPose_plus_plus/FoundationPose wrapper-smoke
 ```
 
 ### CUDA Build Shells
@@ -195,34 +201,21 @@ bash download_ckpts.sh
 cd ..
 ```
 
+The script stores SAM2 checkpoints under `checkpoints/sam2/` and EfficientTAM checkpoints under `checkpoints/etam/`.
+
 Run the camera publisher in one terminal:
 
 ```bash
-pixi run python -m src.realsense_ros2_publisher --serial-number 251622061129
+ros2 run tracking realsense_publisher --serial-number 251622061129
 ```
 
 Run the tracker with EfficientTAM in a second terminal:
 
 ```bash
-pixi run ros2-pose-tracker-efficient-tam
+pixi run -m tracking/FoundationPose_plus_plus/FoundationPose bash -lc 'export PYTHONPATH="$PWD/segmentation/sam2${PYTHONPATH:+:$PYTHONPATH}"; python -m src.ros2_pose_tracker --tracker efficient_tam --tracker-config configs/efficienttam/efficienttam_s_512x512.yaml --tracker-checkpoint checkpoints/etam/efficienttam_s_512x512.pt --mesh-path demo_data/t_shape/t_shape.obj --timing-report-every 1'
 ```
 
-Use the task above instead of running `pixi run python -m src.ros2_pose_tracker ...` directly from the repository root. The root Pixi environment does not install `foundationpose_wrapper`, so direct root-environment launches will fail with `ModuleNotFoundError: No module named 'foundationpose_wrapper'`.
-
-The root task delegates to the dedicated FoundationPose Pixi environment and runs:
-
-- `src.ros2_pose_tracker`
-- `--tracker efficient_tam`
-- `--tracker-config configs/efficienttam/efficienttam_s_512x512.yaml`
-- `--tracker-checkpoint checkpoints/efficienttam_s_512x512.pt`
-- `--mesh-path demo_data/t_shape/t_shape.obj`
-- `--timing-report-every 1`
-
-For an ad-hoc launch with custom arguments, explicitly select the FoundationPose manifest and preserve the SAM2 source path:
-
-```bash
-pixi run -m tracking/FoundationPose_plus_plus/FoundationPose bash -lc 'export PYTHONPATH="$PWD/segmentation/sam2${PYTHONPATH:+:$PYTHONPATH}"; python -m src.ros2_pose_tracker --tracker efficient_tam --tracker-config configs/efficienttam/efficienttam_s_512x512.yaml --tracker-checkpoint checkpoints/efficienttam_s_512x512.pt --mesh-path demo_data/t_shape/t_shape.obj --timing-report-every 1'
-```
+Use the dedicated FoundationPose Pixi environment for `src.ros2_pose_tracker`. The root Pixi environment does not install `foundationpose_wrapper`, so direct root-environment launches will fail with `ModuleNotFoundError: No module named 'foundationpose_wrapper'`.
 
 The tracker no longer takes an initialization mask or bbox from the command line. After startup, focus the RGB window, press `e` to enter edit mode, draw the initialization box, then press `e` again to confirm and start tracking. If `mycpp` is unavailable, `src.ros2_pose_tracker` falls back to an unclustered rotation-grid path, but `build-native` is the recommended setup.
 

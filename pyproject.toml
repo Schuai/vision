@@ -2,6 +2,7 @@
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+# Python package metadata for the root integration package.
 [project]
 name = "vision_pipeline"
 version = "0.1.0"
@@ -23,29 +24,47 @@ dependencies = [
   "trimesh==4.2.2",
   "tqdm==4.66.5",
   "PyYAML==6.0.3",
+  "click==8.1.8",
 ]
 
 [tool.setuptools.packages.find]
 include = ["src*"]
 
+# ============================= Pixi workspace ============================= #
+
+# The root workspace owns the shared ROS2 + segmentation integration envs.
 [tool.pixi.workspace]
 channels = ["https://prefix.dev/conda-forge"]
 platforms = ["linux-64"]
 
+# Source repository-local environment variables when entering `pixi shell`
+# or running Pixi tasks. `env.sh` defines ROOT_DIR for path helpers.
+[tool.pixi.activation]
+scripts = ["env.sh"]
+
+# ----------------------------- Base feature ------------------------------ #
+
+# Packages shared by every root environment.
 [tool.pixi.feature.base.dependencies]
 python = "3.12.*"
 numpy = "1.26.*"
 pyyaml = "==6.0.3"
+click = "8.1.*"
+colcon-common-extensions = "*"
 cmake = ">=3.28,<4"
 ninja = ">=1.11,<2"
 eigen = "3.4.*"
 
+# Editable local packages and runtime-only PyPI dependencies.
 [tool.pixi.feature.base.pypi-dependencies]
 vision_pipeline = { path = ".", editable = true }
 efficient_track_anything = { path = "segmentation/efficient_track_anything", editable = true }
 sam2 = { path = "segmentation/sam2", editable = true }
 pyrealsense2 = "==2.57.7.10387"
 
+# ------------------------------ ROS2 features ----------------------------- #
+
+# Default ROS2 stack.
 [tool.pixi.feature.jazzy]
 channels = ["https://prefix.dev/robostack-jazzy"]
 
@@ -55,6 +74,7 @@ ros-jazzy-sensor-msgs = "*"
 ros-jazzy-geometry-msgs = "*"
 ros-jazzy-rviz2 = "*"
 
+# Alternate ROS2 stack for Humble systems.
 [tool.pixi.feature.humble]
 channels = ["https://prefix.dev/robostack-humble"]
 
@@ -64,6 +84,9 @@ ros-humble-sensor-msgs = "*"
 ros-humble-geometry-msgs = "*"
 ros-humble-rviz2 = "*"
 
+# ------------------------------ CUDA features ----------------------------- #
+
+# CUDA 12.6 build toolkit for the default Jazzy workflow.
 [tool.pixi.feature.cuda126.dependencies]
 cuda-nvcc_linux-64 = "12.6.*"
 cuda-libraries-dev = "12.6.*"
@@ -71,6 +94,7 @@ cuda-libraries-dev = "12.6.*"
 [tool.pixi.feature.cuda126.system-requirements]
 cuda = "12.6"
 
+# CUDA 12.4 build toolkit for the Humble workflow.
 [tool.pixi.feature.cuda124.dependencies]
 cuda-nvcc_linux-64 = "12.4.*"
 cuda-libraries-dev = "12.4.*"
@@ -78,36 +102,47 @@ cuda-libraries-dev = "12.4.*"
 [tool.pixi.feature.cuda124.system-requirements]
 cuda = "12.4"
 
-[tool.pixi.tasks]
-import-smoke = "python -c \"import efficient_track_anything.wrapper, sam2.wrapper; print('import smoke passed')\""
-wrapper-smoke = "python -c \"from efficient_track_anything.wrapper import EfficientTrackAnythingWrapper; from sam2.wrapper import Sam2Wrapper; EfficientTrackAnythingWrapper(); Sam2Wrapper(); print('wrapper smoke passed')\""
-ros-smoke = "python -c \"import rclpy; from sensor_msgs.msg import CameraInfo, Image; from geometry_msgs.msg import PoseStamped; print('ros smoke passed')\""
-pipeline-help = "python -m src.pipeline --help"
-pipeline-dry-run = "python -m src.pipeline --dry-run"
-env-diagnostics = "python -c \"import os, shutil, sys, torch; from pathlib import Path; nvcc = shutil.which('nvcc') or ''; cuda_home = str(Path(nvcc).resolve().parents[1]) if nvcc else os.environ.get('CUDA_HOME', ''); print(sys.executable); print(torch.__version__); print(torch.version.cuda); print(nvcc); print(cuda_home)\""
-ros2-pose-tracker-efficient-tam = "pixi run -m tracking/FoundationPose_plus_plus/FoundationPose ros2-pose-tracker-efficient-tam"
+# ------------------------------ Environments ------------------------------ #
 
-[tool.pixi.tasks.env-diagnostics-jazzy]
-cmd = "python -c \"import os, shutil, sys, torch; from pathlib import Path; nvcc = shutil.which('nvcc') or ''; cuda_home = str(Path(nvcc).resolve().parents[1]) if nvcc else os.environ.get('CUDA_HOME', ''); print(sys.executable); print(torch.__version__); print(torch.version.cuda); print(nvcc); print(cuda_home)\""
+# Keep environments explicit so task defaults and manual `-e ...` selection are obvious.
+[tool.pixi.environments]
+default = { features = ["base", "jazzy", "cuda126"], solve-group = "jazzy-cuda126" }
+jazzy-cuda126 = { features = ["base", "jazzy", "cuda126"], solve-group = "jazzy-cuda126" }
+humble-cuda124 = { features = ["base", "humble", "cuda124"], solve-group = "humble-cuda124" }
+
+# --------------------------------- Tasks ---------------------------------- #
+
+# Operational helpers: download segmentation checkpoints and switch CUDA build toolkits.
+[tool.pixi.tasks]
+
+[tool.pixi.tasks.download-seg-ckpt]
+cmd = "bash checkpoints/download_ckpts.sh"
+description = "Download the default SAM2 and EfficientTAM segmentation checkpoints."
+
+[tool.pixi.tasks.download_seg-ckpt-all]
+cmd = "bash checkpoints/download_ckpts_all.sh"
+description = "Download all SAM2, SAM2.1, and EfficientTAM segmentation checkpoints."
+
+[tool.pixi.tasks.ros2-tracking-build]
+cmd = "colcon --log-base ros2/tracking/log build --base-paths ros2/tracking --packages-select tracking --build-base ros2/tracking/build --install-base ros2/tracking/install"
+description = "Build the ROS2 tracking package with package-local build, install, and log directories."
 default-environment = "jazzy-cuda126"
 
-[tool.pixi.tasks.env-diagnostics-humble]
-cmd = "python -c \"import os, shutil, sys, torch; from pathlib import Path; nvcc = shutil.which('nvcc') or ''; cuda_home = str(Path(nvcc).resolve().parents[1]) if nvcc else os.environ.get('CUDA_HOME', ''); print(sys.executable); print(torch.__version__); print(torch.version.cuda); print(nvcc); print(cuda_home)\""
-default-environment = "humble-cuda124"
+[tool.pixi.tasks.rviz]
+cmd = "rviz2"
+description = "Launch RViz2 from the default Jazzy ROS2 environment."
+default-environment = "jazzy-cuda126"
 
 [tool.pixi.tasks.cuda126-shell]
 cmd = '''
 bash -lc 'cuda_home=$(dirname "$(dirname "$(command -v nvcc)")"); export CUDA_HOME="$cuda_home"; export CUDA_PATH="$cuda_home"; export CUDACXX="$cuda_home/bin/nvcc"; echo "Using CUDA toolkit at $CUDA_HOME"; exec bash'
 '''
+description = "Open a shell configured for the Jazzy CUDA 12.6 build toolkit."
 default-environment = "jazzy-cuda126"
 
 [tool.pixi.tasks.cuda124-shell]
 cmd = '''
 bash -lc 'cuda_home=$(dirname "$(dirname "$(command -v nvcc)")"); export CUDA_HOME="$cuda_home"; export CUDA_PATH="$cuda_home"; export CUDACXX="$cuda_home/bin/nvcc"; echo "Using CUDA toolkit at $CUDA_HOME"; exec bash'
 '''
+description = "Open a shell configured for the Humble CUDA 12.4 build toolkit."
 default-environment = "humble-cuda124"
-
-[tool.pixi.environments]
-default = { features = ["base", "jazzy", "cuda126"], solve-group = "jazzy-cuda126" }
-jazzy-cuda126 = { features = ["base", "jazzy", "cuda126"], solve-group = "jazzy-cuda126" }
-humble-cuda124 = { features = ["base", "humble", "cuda124"], solve-group = "humble-cuda124" }

@@ -42,4 +42,5 @@ docker/artifacts/
 
 # weights
 **/checkpoints/*
+tracker/FoundationPose_plus_plus/FoundationPose/weights/
 tracking/FoundationPose_plus_plus/FoundationPose/weights/

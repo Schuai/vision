@@ -1,0 +1,3 @@
+seg_model_type: "ETAM"
+seg_config: "configs/efficienttam/efficienttam_ti_512x512.yaml"
+seg_checkpoint: "efficienttam_ti_512x512.pt"
