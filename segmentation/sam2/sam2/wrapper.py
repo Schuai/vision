@@ -61,6 +61,7 @@ class Sam2Wrapper:
     ) -> Any:
         from sam2.build_sam import build_sam2_camera_predictor
 
+        kwargs.setdefault("vos_optimized", True)
         self.kind = "camera_predictor"
         self.instance = build_sam2_camera_predictor(
             config_file=config_file,

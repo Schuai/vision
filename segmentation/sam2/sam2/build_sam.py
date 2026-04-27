@@ -105,10 +105,18 @@ def build_sam2_camera_predictor(
     mode="eval",
     hydra_overrides_extra=[],
     apply_postprocessing=True,
+    vos_optimized=False,
 ):
     hydra_overrides = [
         "++model._target_=sam2.sam2_camera_predictor.SAM2CameraPredictor",
     ]
+    if vos_optimized:
+        hydra_overrides = [
+            "++model._target_=sam2.sam2_camera_predictor.SAM2CameraPredictorVOS",
+        ]
+        if "_hiera_t" not in str(config_file):
+            hydra_overrides.append("++model.compile_image_encoder=True")
+
     if apply_postprocessing:
         hydra_overrides_extra = hydra_overrides_extra.copy()
         hydra_overrides_extra += [
